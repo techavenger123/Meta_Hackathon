@@ -29,6 +29,20 @@ class State(BaseModel):
 class ResetInput(BaseModel):
     task_id: str = "task_easy"
 
+class CustomResetInput(BaseModel):
+    """
+    Fully dynamic reset — caller specifies the entire layout at runtime.
+    grid_size, robot_start, garbage positions, obstacles, and battery
+    are all optional overrides on top of a base task_id.
+    Pass task_id='custom' to skip scenario defaults entirely.
+    """
+    task_id: str = "task_easy"
+    grid_size: Optional[Tuple[int, int]] = None
+    robot_start: Optional[Tuple[int, int]] = None
+    garbage_positions: Optional[List[Tuple[int, int]]] = None
+    obstacle_positions: Optional[List[Tuple[int, int]]] = None
+    max_battery: Optional[int] = None
+
 class ResetOutput(BaseModel):
     observation: Observation
 

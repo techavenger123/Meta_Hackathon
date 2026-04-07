@@ -22,7 +22,7 @@ SCENARIOS: Dict[str, Dict[str, Any]] = {
         "obstacle_starts": [
             (1, 1), (1, 2), (1, 3), (1, 4),
             (3, 1), (3, 2), (3, 3), (3, 4),
-            (5, 5), (5, 6), (5, 7), (5, 8),
+            (6, 5), (6, 6), (6, 7), (6, 8),  # shifted: (5,5) was also a garbage target!
             (7, 7), (7, 8), (7, 9)
         ],
         "max_battery": 80,

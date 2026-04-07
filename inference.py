@@ -2,209 +2,344 @@ import os
 import time
 import requests
 import json
+from collections import deque
 from openai import OpenAI
 
 API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
 MODEL_NAME   = os.environ.get("MODEL_NAME",   "gpt-4o-mini")
 HF_TOKEN     = os.environ.get("HF_TOKEN",     "")
-ENV_URL      = os.environ.get("ENV_URL",      "http://localhost:7860")
+ENV_URL      = os.environ.get("ENV_URL",      "http://localhost:7861")
 
-TASKS = ["task_easy", "task_medium", "task_hard"]
-MAX_STEPS = 50
+MAX_STEPS = 100
 
-def print_log(log_dict):
-    """Prints the required structured JSON logs strictly to stdout."""
-    print(json.dumps(log_dict), flush=True)
+# ──────────────────────────────────────────────────────────
+# BFS CORE
+# ──────────────────────────────────────────────────────────
 
-def heuristic_action(obs, last_blocked: set) -> str:
+def bfs(start, goal, obstacles, grid_w, grid_h):
     """
-    Obstacle-aware heuristic. Tries to move toward the nearest garbage
-    while avoiding known blocked directions from the current position.
+    BFS from start to goal avoiding obstacles.
+    Returns (first_direction, path_length) or (None, inf) if unreachable.
     """
+    start, goal = tuple(start), tuple(goal)
+    if start == goal:
+        return ("COLLECT", 0)
+
+    obstacle_set = frozenset(tuple(o) for o in obstacles)
+    dirs = [("RIGHT",(1,0)), ("LEFT",(-1,0)), ("UP",(0,1)), ("DOWN",(0,-1))]
+    queue   = deque([(start, None, 0)])
+    visited = {start}
+
+    while queue:
+        pos, first, depth = queue.popleft()
+        for name, (dx, dy) in dirs:
+            npos = (pos[0]+dx, pos[1]+dy)
+            if not (0 <= npos[0] < grid_w and 0 <= npos[1] < grid_h):
+                continue
+            if npos in obstacle_set or npos in visited:
+                continue
+            move = first if first else name
+            if npos == goal:
+                return (move, depth + 1)
+            visited.add(npos)
+            queue.append((npos, move, depth + 1))
+
+    return (None, float('inf'))
+
+
+def nearest_neighbour_order(start, targets, obstacles, grid_w, grid_h):
+    """
+    Orders garbage by nearest-neighbour TSP using actual BFS cost.
+    Much better than Manhattan when obstacles split direct paths.
+    """
+    remaining = list(targets)
+    ordered   = []
+    current   = tuple(start)
+    while remaining:
+        best = min(remaining, key=lambda t: bfs(current, t, obstacles, grid_w, grid_h)[1])
+        ordered.append(best)
+        remaining.remove(best)
+        current = tuple(best)
+    return ordered
+
+
+# ──────────────────────────────────────────────────────────
+# HEURISTIC — pure BFS, provably never loops
+# ──────────────────────────────────────────────────────────
+
+def heuristic_action(obs, _stuck_counter=[0]) -> str:
     if not obs["garbage_positions"]:
-        return "UP"  # nothing to do
+        return "UP"
 
-    r_pos = list(obs["robot_position"])
-    obstacles = [list(o) for o in obs["obstacle_positions"]]
+    r_pos          = list(obs["robot_position"])
+    obstacles      = [list(o) for o in obs["obstacle_positions"]]
     grid_w, grid_h = obs["grid_size"]
+    garbage        = [tuple(g) for g in obs["garbage_positions"]]
 
-    # Find nearest garbage by Manhattan distance
-    target = min(obs["garbage_positions"], key=lambda g: abs(g[0]-r_pos[0]) + abs(g[1]-r_pos[1]))
-
-    if list(target) == r_pos:
+    if tuple(r_pos) in garbage:
+        _stuck_counter[0] = 0
         return "COLLECT"
 
-    # Build preference order toward the target
-    dx = target[0] - r_pos[0]
-    dy = target[1] - r_pos[1]
+    ordered = nearest_neighbour_order(r_pos, garbage, obstacles, grid_w, grid_h)
 
-    candidates = []
-    if dx > 0: candidates.append(("RIGHT", [r_pos[0]+1, r_pos[1]]))
-    if dx < 0: candidates.append(("LEFT",  [r_pos[0]-1, r_pos[1]]))
-    if dy > 0: candidates.append(("UP",    [r_pos[0],   r_pos[1]+1]))
-    if dy < 0: candidates.append(("DOWN",  [r_pos[0],   r_pos[1]-1]))
+    # If stuck for too many steps, try the SECOND-nearest target instead
+    # (breaks out of dead-end loops on task_hard)
+    if _stuck_counter[0] >= 4 and len(ordered) > 1:
+        ordered = [ordered[1], ordered[0]] + ordered[2:]
+    if _stuck_counter[0] >= 8:
+        # Rotate the whole list one more step for a full direction change
+        ordered = ordered[1:] + ordered[:1]
+        _stuck_counter[0] = 0
 
-    # Append perpendicular moves as fallback escape routes
-    all_moves = [
-        ("RIGHT", [r_pos[0]+1, r_pos[1]]),
-        ("LEFT",  [r_pos[0]-1, r_pos[1]]),
-        ("UP",    [r_pos[0],   r_pos[1]+1]),
-        ("DOWN",  [r_pos[0],   r_pos[1]-1]),
-    ]
-    for m in all_moves:
-        if m not in candidates:
-            candidates.append(m)
+    target = ordered[0]
 
-    for direction, npos in candidates:
-        # Skip if this direction was blocked on a previous step from this same cell
-        if direction in last_blocked:
-            continue
-        # Skip if out of bounds
-        if not (0 <= npos[0] < grid_w and 0 <= npos[1] < grid_h):
-            continue
-        # Skip if obstacle
-        if npos in obstacles:
-            continue
-        return direction
+    if tuple(target) == tuple(r_pos):
+        _stuck_counter[0] = 0
+        return "COLLECT"
 
-    # Truly stuck — just pick the first non-blocked direction
+    move, _ = bfs(r_pos, target, obstacles, grid_w, grid_h)
+    if move and move != "COLLECT":
+        _stuck_counter[0] = 0
+        return move
+
+    # BFS says this target is unreachable — try alternates
+    for alt in ordered[1:]:
+        move, _ = bfs(r_pos, alt, obstacles, grid_w, grid_h)
+        if move and move != "COLLECT":
+            _stuck_counter[0] = 0
+            return move
+
+    # Completely surrounded — take any open neighbour to escape
+    _stuck_counter[0] += 1
+    obstacle_set = frozenset(tuple(o) for o in obstacles)
+    for name, (dx, dy) in [("RIGHT",(1,0)), ("LEFT",(-1,0)), ("UP",(0,1)), ("DOWN",(0,-1))]:
+        npos = (r_pos[0]+dx, r_pos[1]+dy)
+        if (0 <= npos[0] < grid_w and 0 <= npos[1] < grid_h
+                and npos not in obstacle_set):
+            return name
+
     return "RIGHT"
 
 
-def resolve_next_action(client, obs, context_history, last_blocked: set) -> str:
-    """
-    Asks the LLM for the next command based on sensor readings.
-    """
+# ──────────────────────────────────────────────────────────
+# LLM RESOLVER — heuristic is primary, LLM is optional
+# ──────────────────────────────────────────────────────────
+
+def resolve_next_action(client, obs, context_history) -> str:
+    heuristic = heuristic_action(obs)
+
+    if client is None:
+        return heuristic
+
     system_prompt = (
-        "You are an AI brain controlling a simulated garbage collecting robot.\n"
-        "Your goal is to navigate a grid room and collect all pieces of garbage before running out of battery.\n"
-        "Your available actions are EXACTLY ONE of the following keywords:\n"
-        "UP\nDOWN\nLEFT\nRIGHT\nCOLLECT\n\n"
-        "If you are standing on top of garbage, execute COLLECT.\n"
-        "Otherwise, move towards the garbage by matching your X/Y coordinates."
+        "You control a garbage collecting robot on a grid.\n"
+        "Reply with EXACTLY ONE of: UP  DOWN  LEFT  RIGHT  COLLECT\n\n"
+        "Rules:\n"
+        "- COLLECT only when your position exactly matches a garbage position.\n"
+        "- Never move into an obstacle tile.\n"
+        "- Move toward the nearest reachable garbage.\n"
+        f"- Pathfinding suggests: {heuristic}  (only override if clearly wrong)"
     )
-    
-    prompt = f"ENVIRONMENT STATUS:\n{obs['message']}\n\nWhat is your next command?"
-    
+
     try:
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
                 {"role": "system", "content": system_prompt},
                 *context_history,
-                {"role": "user", "content": prompt}
+                {"role": "user", "content": f"STATUS:\n{obs['message']}\n\nCommand?"}
             ],
             temperature=0.0,
             max_tokens=6
         )
         action = response.choices[0].message.content.strip().upper()
-        # Clean up output
         for valid in ["UP", "DOWN", "LEFT", "RIGHT", "COLLECT"]:
             if valid in action:
                 return valid
-        return "UP"  # Default fallback
+        return heuristic
     except Exception as e:
         print(f"[LLM ERROR] {e}")
-        return heuristic_action(obs, last_blocked)
+        return heuristic
+
+
+# ──────────────────────────────────────────────────────────
+# DYNAMIC GARBAGE PLACEMENT
+# ──────────────────────────────────────────────────────────
+
+def prompt_custom_garbage(grid_w, grid_h, obstacles):
+    """
+    Interactive CLI — lets you place garbage tiles before each episode.
+    Supports: manual 'x,y' | 'random N' | 'done'
+    """
+    obstacle_set = set(tuple(o) for o in obstacles)
+    print(f"\n  Grid: {grid_w} x {grid_h}   Obstacles: {sorted(obstacle_set)}")
+    print("  Enter garbage positions:")
+    print("    x,y       place at column x, row y  (e.g. '4,4')")
+    print("    random N  place N random pieces      (e.g. 'random 5')")
+    print("    done      start the episode\n")
+
+    garbage = []
+    while True:
+        raw = input("  Garbage > ").strip().lower()
+
+        if raw == "done":
+            if not garbage:
+                print("  Need at least one garbage tile.")
+                continue
+            break
+
+        if raw.startswith("random"):
+            import random
+            parts = raw.split()
+            n = int(parts[1]) if len(parts) > 1 else 3
+            candidates = [(x, y) for x in range(grid_w) for y in range(grid_h)
+                          if (x, y) not in obstacle_set]
+            garbage = random.sample(candidates, min(n, len(candidates)))
+            print(f"  Random garbage: {garbage}")
+            break
+
+        try:
+            x, y = map(int, raw.split(","))
+            if not (0 <= x < grid_w and 0 <= y < grid_h):
+                print(f"  Out of bounds — valid: 0-{grid_w-1}, 0-{grid_h-1}")
+                continue
+            if (x, y) in obstacle_set:
+                print(f"  ({x},{y}) is an obstacle.")
+                continue
+            if (x, y) in garbage:
+                print(f"  ({x},{y}) already added.")
+                continue
+            garbage.append((x, y))
+            print(f"  Added ({x},{y})  total: {garbage}")
+        except ValueError:
+            print("  Format: x,y  e.g. '3,4'")
+
+    return garbage
+
+
+def reset_with_custom_garbage(task_id, garbage_positions):
+    """
+    Posts to /reset_custom to inject custom garbage positions at runtime.
+    Falls back to standard /reset if something goes wrong.
+    """
+    try:
+        res = requests.post(f"{ENV_URL}/reset_custom", json={
+            "task_id": task_id,
+            "garbage_positions": [list(g) for g in garbage_positions]
+        })
+        res.raise_for_status()
+        return res.json()["observation"]
+    except Exception as e:
+        print(f"[WARN] /reset_custom failed ({e}), falling back to /reset")
+        res = requests.post(f"{ENV_URL}/reset", json={"task_id": task_id})
+        res.raise_for_status()
+        return res.json()["observation"]
+
+
+# ──────────────────────────────────────────────────────────
+# EPISODE RUNNER
+# ──────────────────────────────────────────────────────────
+
+def print_log(log_dict):
+    print(json.dumps(log_dict), flush=True)
+
+
+def run_episode(client, task_id, obs):
+    print_log({"type": "[START]", "task_id": task_id,
+               "model": MODEL_NAME, "max_steps": MAX_STEPS})
+
+    total_reward    = 0.0
+    done            = False
+    context_history = []
+    step_idx        = 0
+
+    for step_idx in range(1, MAX_STEPS + 1):
+        action = resolve_next_action(client, obs, context_history)
+
+        try:
+            res = requests.post(f"{ENV_URL}/step", json={"command": action})
+            res.raise_for_status()
+            step_data = res.json()
+        except Exception as e:
+            print(f"Step error: {e}")
+            break
+
+        obs          = step_data["observation"]
+        reward       = step_data["reward"]
+        done         = step_data["done"]
+        total_reward += reward
+
+        print_log({"type": "[STEP]", "step": step_idx, "action": action,
+                   "reward": round(reward, 2), "total_reward": round(total_reward, 2),
+                   "done": done})
+
+        if done:
+            break
+
+        time.sleep(0.05)
+
+    try:
+        score = requests.get(f"{ENV_URL}/grade/{task_id}").json()["score"]
+    except Exception:
+        score = 0.0
+
+    print_log({"type": "[END]", "task_id": task_id, "total_steps": step_idx,
+               "final_reward": round(total_reward, 2), "score": score})
+    return score
+
+
+# ──────────────────────────────────────────────────────────
+# MAIN
+# ──────────────────────────────────────────────────────────
 
 def main():
-    print("=" * 60)
-    print("Garbage Collecting Robot — Inference Script")
-    print("=" * 60)
-    print()
+    print("=" * 55)
+    print("  Garbage Collecting Robot — Inference")
+    print("=" * 55)
 
-    client = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL)
+    print("\n  Mode:")
+    print("    [1] Predefined garbage  (standard scenarios)")
+    print("    [2] Dynamic  —  you place garbage each run")
+    dynamic = input("  Select (1 or 2): ").strip() == "2"
 
-    for task_id in TASKS:
-        # 1. Reset Environment
-        print(f"\n{'─' * 40}\nRunning task: {task_id}\n{'─' * 40}")
+    print("\n  Task:")
+    print("    [1] task_easy    5x5   1 piece   no obstacles")
+    print("    [2] task_medium  7x7   3 pieces  obstacles")
+    print("    [3] task_hard    10x10 5 pieces  maze")
+    print("    [4] All tasks")
+    choice = input("  Select (1/2/3/4): ").strip()
+
+    task_map = {"1": ["task_easy"], "2": ["task_medium"],
+                "3": ["task_hard"],  "4": ["task_easy", "task_medium", "task_hard"]}
+    tasks = task_map.get(choice, ["task_easy"])
+
+    client = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL) if HF_TOKEN else None
+    if not client:
+        print("\n  [INFO] No HF_TOKEN — pure BFS heuristic mode.")
+
+    for task_id in tasks:
+        print(f"\n{'─'*40}\n  {task_id}\n{'─'*40}")
+
         try:
             res = requests.post(f"{ENV_URL}/reset", json={"task_id": task_id})
             res.raise_for_status()
-            obs = res.json()["observation"]
+            base_obs = res.json()["observation"]
         except Exception as e:
-            print(f"Failed to reset {task_id}: {e}")
+            print(f"Reset failed: {e}")
             continue
 
-        start_log = {
-            "type": "[START]",
-            "task_id": task_id,
-            "env": "garbage-collecting-robot",
-            "model": MODEL_NAME,
-            "max_steps": MAX_STEPS
-        }
-        print_log(start_log)
+        if dynamic:
+            garbage = prompt_custom_garbage(
+                base_obs["grid_size"][0],
+                base_obs["grid_size"][1],
+                base_obs["obstacle_positions"]
+            )
+            obs = reset_with_custom_garbage(task_id, garbage)
+        else:
+            obs = base_obs
 
-        total_reward = 0.0
-        done = False
-        context_history = []
-        last_blocked: set = set()   # directions blocked at the robot's CURRENT cell
-        last_robot_pos = None
+        run_episode(client, task_id, obs)
 
-        # 2. Run Episode
-        for step_idx in range(1, MAX_STEPS + 1):
-            # Reset blocked directions whenever the robot successfully moves to a new cell
-            current_pos = tuple(obs["robot_position"])
-            if current_pos != last_robot_pos:
-                last_blocked = set()
-                last_robot_pos = current_pos
-
-            action = resolve_next_action(client, obs, context_history, last_blocked)
-            
-            try:
-                res = requests.post(f"{ENV_URL}/step", json={"command": action})
-                res.raise_for_status()
-                step_data = res.json()
-            except Exception as e:
-                print(f"Failed to execute step: {e}")
-                break
-                
-            next_obs = step_data["observation"]
-            reward = step_data["reward"]
-            done = step_data["done"]
-            total_reward += reward
-
-            # If the robot didn't move (obstacle or wall), mark that direction as blocked
-            if tuple(next_obs["robot_position"]) == tuple(obs["robot_position"]):
-                if action in ["UP", "DOWN", "LEFT", "RIGHT"]:
-                    last_blocked.add(action)
-
-            # Update context history (optional memory for LLM)
-            # context_history.append({"role": "user", "content": f"ENVIRONMENT STATUS:\n{obs['message']}\nWhat is your next command?"})
-            # context_history.append({"role": "assistant", "content": action})
-
-            obs = next_obs
-
-            step_log = {
-                "type": "[STEP]",
-                "step": step_idx,
-                "action": action,
-                "reward": reward,
-                "total_reward": total_reward,
-                "done": done,
-            }
-            print_log(step_log)
-
-            if done:
-                break
-
-            time.sleep(0.1)
-
-        # 3. Grade & End Episode
-        try:
-            grade_res = requests.get(f"{ENV_URL}/grade/{task_id}")
-            score = grade_res.json()["score"]
-        except Exception:
-            score = 0.0
-
-        end_log = {
-            "type": "[END]",
-            "task_id": task_id,
-            "total_steps": step_idx,
-            "final_reward": total_reward,
-            "score": score
-        }
-        print_log(end_log)
 
 if __name__ == "__main__":
     main()

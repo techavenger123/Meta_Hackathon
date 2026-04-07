@@ -1,4 +1,4 @@
-from typing import Any, Dict
+from typing import Any, Dict, Optional, List, Tuple
 from models import Observation, State
 from scenarios import SCENARIOS
 
@@ -38,6 +38,55 @@ class GarbageRobotEnv:
         self.steps_taken = 0
         self.done = False
         
+        return self.state()
+
+    def reset_custom(
+        self,
+        task_id: str = "task_easy",
+        grid_size=None,
+        robot_start=None,
+        garbage_positions=None,
+        obstacle_positions=None,
+        max_battery=None,
+    ) -> State:
+        """
+        Dynamic reset: start from a scenario baseline and override any fields.
+        Pass task_id='custom' with all fields set to skip scenario lookup entirely.
+        """
+        # Load base scenario if available, else use defaults
+        if task_id in SCENARIOS:
+            scenario = SCENARIOS[task_id]
+            base_grid       = scenario["grid_size"]
+            base_robot      = scenario["robot_start"]
+            base_garbage    = scenario["garbage_starts"]
+            base_obstacles  = scenario["obstacle_starts"]
+            base_battery    = scenario["max_battery"]
+        else:
+            # 'custom' task_id — caller must provide everything
+            base_grid      = (10, 10)
+            base_robot     = (0, 0)
+            base_garbage   = []
+            base_obstacles = []
+            base_battery   = 60
+
+        self.current_task_id  = task_id
+        self.grid_size         = tuple(grid_size)        if grid_size        else base_grid
+        self.robot_position    = list(robot_start)       if robot_start      else list(base_robot)
+        self.garbage_positions = [list(g) for g in garbage_positions]   if garbage_positions  is not None else [list(g) for g in base_garbage]
+        self.obstacle_positions= [list(o) for o in obstacle_positions]  if obstacle_positions is not None else [list(o) for o in base_obstacles]
+        self.battery_level     = max_battery             if max_battery      else base_battery
+        self.max_battery       = self.battery_level
+        self.inventory_count   = 0
+        self.total_reward      = 0.0
+        self.steps_taken       = 0
+        self.done              = False
+
+        # Validate: remove any garbage placed on top of an obstacle
+        self.garbage_positions = [
+            g for g in self.garbage_positions
+            if g not in self.obstacle_positions
+        ]
+
         return self.state()
 
     def get_observation(self, message: str = "") -> Observation:

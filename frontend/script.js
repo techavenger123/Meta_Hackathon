@@ -1,4 +1,4 @@
-const API_BASE = "http://localhost:7860";
+const API_BASE = "http://localhost:7861";
 
 // DOM Elements
 const statusDot = document.getElementById("status-dot");
@@ -47,6 +47,8 @@ function renderGrid(obs, isReset = false) {
                 cell.className = "cell";
                 cell.dataset.x = x;
                 cell.dataset.y = y;
+                // Click to place/remove garbage dynamically
+                cell.addEventListener("click", () => toggleGarbage(x, y));
                 envGrid.appendChild(cell);
             }
         }
@@ -92,8 +94,6 @@ function renderGrid(obs, isReset = false) {
 
 // Update Telemetry UI
 function updateTelemetry(obs, reward, done) {
-    // We need max battery from somewhere. We can infer it if we know defaults, OR just use current level vs 100 for visual sake, 
-    // but scenario sizes are 30, 50, 80. Let's dynamically calculate percentage based on max_seen_battery.
     if (!window.maxBattery || obs.battery_level > window.maxBattery) {
         window.maxBattery = obs.battery_level;
     }
@@ -102,7 +102,6 @@ function updateTelemetry(obs, reward, done) {
     batteryProgress.style.width = `${pct}%`;
     batteryText.textContent = `${obs.battery_level} units`;
     
-    // Color code battery
     if (pct > 50) batteryProgress.style.background = "var(--success)";
     else if (pct > 20) batteryProgress.style.background = "var(--warning)";
     else batteryProgress.style.background = "var(--danger)";
@@ -119,6 +118,42 @@ function updateTelemetry(obs, reward, done) {
 }
 
 // API Calls
+async function toggleGarbage(x, y) {
+    if (!currentState || autoMode) return;
+    
+    // Ignore obstacles and robot starting position
+    if (currentState.obstacle_positions.some(o => o[0] === x && o[1] === y)) return;
+    if (currentState.robot_position[0] === x && currentState.robot_position[1] === y) return;
+
+    let isGarbage = currentState.garbage_positions.some(g => g[0] === x && g[1] === y);
+    let newPositions = [...currentState.garbage_positions];
+    
+    if (isGarbage) {
+        newPositions = newPositions.filter(g => !(g[0] === x && g[1] === y));
+    } else {
+        newPositions.push([x, y]);
+    }
+
+    try {
+        const res = await fetch(`${API_BASE}/configure`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ 
+                task_id: taskSelect.value,
+                garbage_positions: newPositions
+            })
+        });
+        const data = await res.json();
+        currentState = data.observation;
+        renderGrid(currentState);
+        updateTelemetry(currentState);
+        addLog(`Custom garbage updated! Remaining: ${newPositions.length}`);
+    } catch(err) {
+        console.error("Config error", err);
+        addLog("Failed to update custom garbage layout.");
+    }
+}
+
 async function resetEnv() {
     try {
         const taskId = taskSelect.value;
@@ -147,18 +182,93 @@ async function resetEnv() {
     }
 }
 
-// The Naive Heuristic (same as inference.py fallback)
-function getNextOptimalAction(obs) {
-    if (obs.garbage_positions.length > 0) {
-        const gPos = obs.garbage_positions[0];
-        const rPos = obs.robot_position;
-        if (gPos[0] === rPos[0] && gPos[1] === rPos[1]) return "COLLECT";
-        if (gPos[0] > rPos[0]) return "RIGHT";
-        if (gPos[0] < rPos[0]) return "LEFT";
-        if (gPos[1] > rPos[1]) return "UP";
-        if (gPos[1] < rPos[1]) return "DOWN";
+// BFS + TSP Heuristic (Mirrors inference.py)
+function bfsNextMove(rPos, target, obstacles, gridW, gridH) {
+    if (rPos[0] === target[0] && rPos[1] === target[1]) return "COLLECT";
+    const obsSet = new Set(obstacles.map(o => `${o[0]},${o[1]}`));
+    const dirs = [
+        {name: "RIGHT", dx: 1, dy: 0}, {name: "LEFT", dx: -1, dy: 0},
+        {name: "UP", dx: 0, dy: 1}, {name: "DOWN", dx: 0, dy: -1}
+    ];
+
+    let queue = [ {pos: [...rPos], firstMove: null} ];
+    let visited = new Set([`${rPos[0]},${rPos[1]}`]);
+
+    while(queue.length > 0) {
+        let current = queue.shift();
+        for (let d of dirs) {
+            let nx = current.pos[0] + d.dx;
+            let ny = current.pos[1] + d.dy;
+            if (nx < 0 || nx >= gridW || ny < 0 || ny >= gridH) continue;
+            let nKey = `${nx},${ny}`;
+            if (obsSet.has(nKey) || visited.has(nKey)) continue;
+            let move = current.firstMove ? current.firstMove : d.name;
+            if (nx === target[0] && ny === target[1]) return move;
+            visited.add(nKey);
+            queue.push({pos: [nx, ny], firstMove: move});
+        }
     }
-    return "LEFT"; // Default
+    return null;
+}
+
+function nearestNeighbourOrder(start, targets, obstacles, gridW, gridH) {
+    function bfsDist(a, b) {
+        if (a[0] === b[0] && a[1] === b[1]) return 0;
+        const obsSet = new Set(obstacles.map(o => `${o[0]},${o[1]}`));
+        const dirs = [[1,0], [-1,0], [0,1], [0,-1]];
+        let queue = [ {pos: [...a], dist: 0} ];
+        let visited = new Set([`${a[0]},${a[1]}`]);
+
+        while (queue.length > 0) {
+            let curr = queue.shift();
+            for (let d of dirs) {
+                let nx = curr.pos[0] + d[0];
+                let ny = curr.pos[1] + d[1];
+                if (nx < 0 || nx >= gridW || ny < 0 || ny >= gridH) continue;
+                let nKey = `${nx},${ny}`;
+                if (obsSet.has(nKey) || visited.has(nKey)) continue;
+                if (nx === b[0] && ny === b[1]) return curr.dist + 1;
+                visited.add(nKey);
+                queue.push({pos: [nx, ny], dist: curr.dist + 1});
+            }
+        }
+        return Infinity;
+    }
+
+    let remaining = [...targets];
+    let ordered = [];
+    let current = [...start];
+    
+    while(remaining.length > 0) {
+        let nearest = remaining[0];
+        let minDist = bfsDist(current, nearest);
+        for (let i = 1; i < remaining.length; i++) {
+            let d = bfsDist(current, remaining[i]);
+            if (d < minDist) {
+                minDist = d;
+                nearest = remaining[i];
+            }
+        }
+        ordered.push(nearest);
+        remaining = remaining.filter(t => t !== nearest);
+        current = [...nearest];
+    }
+    return ordered;
+}
+
+function getNextOptimalAction(obs) {
+    if (obs.garbage_positions.length === 0) return "UP";
+    const rPos = obs.robot_position;
+    const targets = obs.garbage_positions;
+    const obstacles = obs.obstacle_positions;
+    const gridW = obs.grid_size[0];
+    const gridH = obs.grid_size[1];
+
+    if (targets.some(g => g[0] === rPos[0] && g[1] === rPos[1])) return "COLLECT";
+
+    const ordered = nearestNeighbourOrder(rPos, targets, obstacles, gridW, gridH);
+    const move = bfsNextMove(rPos, ordered[0], obstacles, gridW, gridH);
+    return move ? move : "RIGHT";
 }
 
 async function stepEnv() {
