@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Garbage Collecting Robot Dashboard</title>
+    <!-- Use Inter font for modern aesthetics -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="background-mesh"></div>
+    <div class="dashboard">
+        <header>
+            <div class="logo">
+                <div class="dot online" id="status-dot"></div>
+                <h1>Robot Control Center</h1>
+            </div>
+            <div class="controls">
+                <select id="task-select">
+                    <option value="task_easy">Small Room Clean (Easy)</option>
+                    <option value="task_medium">Medium Room (Obstacles)</option>
+                    <option value="task_hard">Large Maze Cleanup (Hard)</option>
+                </select>
+                <button id="reset-btn" class="btn secondary">Reset</button>
+                <button id="auto-btn" class="btn primary">Start Auto-RL</button>
+                <button id="manual-btn" class="btn outline">Manual Step</button>
+            </div>
+        </header>
+
+        <main>
+            <div class="grid-container panel">
+                <div id="env-grid" class="grid-world"></div>
+            </div>
+
+            <aside class="side-panel">
+                <div class="telemetry panel glass">
+                    <h2>Telemetry</h2>
+                    <div class="stat-box">
+                        <label>Battery Level</label>
+                        <div class="progress-bar">
+                            <div class="progress" id="battery-progress" style="width: 100%;"></div>
+                        </div>
+                        <span id="battery-text" class="stat-value">100%</span>
+                    </div>
+
+                    <div class="stat-box">
+                        <label>Reward Score</label>
+                        <span id="score-text" class="stat-value highlight">0.0</span>
+                    </div>
+
+                    <div class="stat-box">
+                        <label>Garbage Collected</label>
+                        <span id="inventory-text" class="stat-value">0</span>
+                    </div>
+                </div>
+
+                <div class="logs panel glass">
+                    <h2>RL Observations</h2>
+                    <div id="log-feed" class="log-feed">
+                        <p class="placeholder">Awaiting environment reset...</p>
+                    </div>
+                </div>
+            </aside>
+        </main>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>

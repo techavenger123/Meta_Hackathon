@@ -1,0 +1,7 @@
+Meta/
+Robot/
+.venv/
+__pycache__/
+*.pyc
+.git/
+.env

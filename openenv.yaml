@@ -1,0 +1,20 @@
+name: garbage-collecting-robot
+version: "1.0.0"
+description: "An OpenEnv-compliant reinforcement learning environment for a garbage collecting robot. The agent navigates a grid, picks up garbage, and manages its battery."
+type: logical-grid-world
+action_space:
+  type: discrete
+  description: "Movement and interaction commands: UP, DOWN, LEFT, RIGHT, COLLECT."
+observation_space:
+  type: object
+  description: "Grid state including robot position, garbage coordinates, inventory size, battery level, and a conversational text interpretation of the environment."
+tasks:
+  - id: task_easy
+    difficulty: easy
+    description: "Navigate a small 5x5 grid to collect 1 piece of garbage."
+  - id: task_medium
+    difficulty: medium
+    description: "Navigate a 7x7 grid to collect 3 pieces of garbage with limited battery."
+  - id: task_hard
+    difficulty: hard
+    description: "Navigate a 10x10 maze avoiding obstacles to collect 5 pieces of garbage with strict battery usage."

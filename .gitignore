@@ -1,0 +1,10 @@
+.venv/
+Meta/
+Robot/
+__pycache__/
+*.pyc
+.env
+uv.lock
+test_run.log
+hf_test.log
+hf_test2.log
