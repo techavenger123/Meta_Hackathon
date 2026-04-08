@@ -9,17 +9,23 @@ API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
 MODEL_NAME   = os.environ.get("MODEL_NAME",   "gpt-4o-mini")
 HF_TOKEN     = os.environ.get("HF_TOKEN",     "")
 ENV_URL      = os.environ.get("ENV_URL",      "http://localhost:7861")
+LOCAL_MODEL_PATH = os.environ.get(
+    "LOCAL_MODEL_PATH",
+    "/home/robotics-mu/.unsloth/studio/outputs/unsloth_Llama-3.2-3B-Instruct-bnb-4bit_1775621239"
+)
 
 MAX_STEPS = 100
 
-from unsloth import FastLanguageModel
+# Lazy-loaded local model — populated in main() if Unsloth is available
+_local_model     = None
+_local_tokenizer = None
 
-model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name="/home/robotics-mu/.unsloth/studio/outputs/unsloth_Llama-3.2-3B-Instruct-bnb-4bit_1775621239",
-    max_seq_length=2048,
-    load_in_4bit=True,
-)
-FastLanguageModel.for_inference(model)
+# Q-Learning agent — loaded once in main(), used as primary policy
+_ql_agent = None
+try:
+    from qlearning import QLearningAgent
+except ImportError:
+    QLearningAgent = None
 # ──────────────────────────────────────────────────────────
 # BFS CORE
 # ──────────────────────────────────────────────────────────
@@ -75,7 +81,9 @@ def nearest_neighbour_order(start, targets, obstacles, grid_w, grid_h):
 # HEURISTIC — pure BFS, provably never loops
 # ──────────────────────────────────────────────────────────
 
-def heuristic_action(obs, _stuck_counter=[0]) -> str:
+def heuristic_action(obs, _stuck_counter=None) -> str:
+    if _stuck_counter is None:
+        _stuck_counter = [0]
     if not obs["garbage_positions"]:
         return "UP"
 
@@ -130,14 +138,17 @@ def heuristic_action(obs, _stuck_counter=[0]) -> str:
 
 
 # ──────────────────────────────────────────────────────────
-# LLM RESOLVER — heuristic is primary, LLM is optional
+# ACTION RESOLVER  (priority: Q-table → LLM → BFS heuristic)
 # ──────────────────────────────────────────────────────────
 
-def resolve_next_action(client, obs, context_history) -> str:
-    heuristic = heuristic_action(obs)
+def resolve_next_action(client, obs, context_history, stuck_counter=None) -> str:
+    heuristic = heuristic_action(obs, stuck_counter)
 
-    if client is None:
-        return heuristic
+    # ── 1. Q-Learning policy (trained, deterministic) ──────────
+    if _ql_agent is not None:
+        q_action = _ql_agent.get_action(obs)
+        if q_action is not None:
+            return q_action
 
     system_prompt = (
         "You control a garbage collecting robot on a grid.\n"
@@ -149,25 +160,46 @@ def resolve_next_action(client, obs, context_history) -> str:
         f"- Pathfinding suggests: {heuristic}  (only override if clearly wrong)"
     )
 
-    try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                *context_history,
-                {"role": "user", "content": f"STATUS:\n{obs['message']}\n\nCommand?"}
-            ],
-            temperature=0.0,
-            max_tokens=6
-        )
-        action = response.choices[0].message.content.strip().upper()
-        for valid in ["UP", "DOWN", "LEFT", "RIGHT", "COLLECT"]:
-            if valid in action:
-                return valid
-        return heuristic
-    except Exception as e:
-        print(f"[LLM ERROR] {e}")
-        return heuristic
+    # ── Try local Unsloth model first ──────────────────────────
+    if _local_model is not None and _local_tokenizer is not None:
+        try:
+            prompt = (
+                f"{system_prompt}\n\nSTATUS:\n{obs['message']}\n\nCommand:"
+            )
+            inputs = _local_tokenizer(prompt, return_tensors="pt").to(_local_model.device)
+            outputs = _local_model.generate(
+                **inputs, max_new_tokens=8, temperature=1.0, do_sample=False
+            )
+            decoded = _local_tokenizer.decode(outputs[0], skip_special_tokens=True)
+            token = decoded.split("Command:")[-1].strip().upper()
+            for valid in ["UP", "DOWN", "LEFT", "RIGHT", "COLLECT"]:
+                if valid in token:
+                    return valid
+        except Exception as e:
+            print(f"[LOCAL LLM ERROR] {e}")
+
+    # ── Try remote OpenAI-compatible endpoint ─────────────────
+    if client is not None:
+        try:
+            response = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    *context_history,
+                    {"role": "user", "content": f"STATUS:\n{obs['message']}\n\nCommand?"}
+                ],
+                temperature=0.0,
+                max_tokens=6
+            )
+            action = response.choices[0].message.content.strip().upper()
+            for valid in ["UP", "DOWN", "LEFT", "RIGHT", "COLLECT"]:
+                if valid in action:
+                    return valid
+        except Exception as e:
+            print(f"[REMOTE LLM ERROR] {e}")
+
+    # ── Final fallback: pure BFS heuristic ────────────────────
+    return heuristic
 
 
 # ──────────────────────────────────────────────────────────
@@ -253,16 +285,19 @@ def print_log(log_dict):
 
 
 def run_episode(client, task_id, obs):
+    policy = "q-table" if (_ql_agent and _ql_agent.loaded) else \
+             ("local-llm" if _local_model else ("remote-llm" if client else "bfs"))
     print_log({"type": "[START]", "task_id": task_id,
-               "model": MODEL_NAME, "max_steps": MAX_STEPS})
+               "model": MODEL_NAME, "policy": policy, "max_steps": MAX_STEPS})
 
     total_reward    = 0.0
     done            = False
     context_history = []
     step_idx        = 0
+    stuck_counter   = [0]  # per-episode counter — no cross-episode state leak
 
     for step_idx in range(1, MAX_STEPS + 1):
-        action = resolve_next_action(client, obs, context_history)
+        action = resolve_next_action(client, obs, context_history, stuck_counter)
 
         try:
             res = requests.post(f"{ENV_URL}/step", json={"command": action})
@@ -301,9 +336,39 @@ def run_episode(client, task_id, obs):
 # ──────────────────────────────────────────────────────────
 
 def main():
+    global _local_model, _local_tokenizer, _ql_agent
+
     print("=" * 55)
     print("  Garbage Collecting Robot — Inference")
     print("=" * 55)
+
+    # ── 1. Load Q-Learning policy (fastest, no GPU needed) ────
+    if QLearningAgent is not None:
+        _ql_agent = QLearningAgent()
+        if _ql_agent.loaded:
+            print(f"\n  [INFO] Q-table loaded ({len(_ql_agent.qtable):,} states). "
+                  "Q-learning is the primary policy.")
+        else:
+            print("\n  [WARN] No Q-table found (qtable.json). "
+                  "Run: python qlearning.py --train")
+            print("          Falling through to LLM / BFS.")
+    else:
+        print("\n  [WARN] qlearning.py not found — skipping Q-table.")
+
+    # ── 2. Attempt to load local Unsloth model ────────────────
+    try:
+        from unsloth import FastLanguageModel
+        print(f"\n  [INFO] Loading local model from: {LOCAL_MODEL_PATH}")
+        _local_model, _local_tokenizer = FastLanguageModel.from_pretrained(
+            model_name=LOCAL_MODEL_PATH,
+            max_seq_length=2048,
+            load_in_4bit=True,
+        )
+        FastLanguageModel.for_inference(_local_model)
+        print("  [INFO] Local Unsloth model loaded (used when Q-table misses a state).")
+    except Exception as e:
+        print(f"  [WARN] Local model unavailable ({e}). Falling back to remote/heuristic.")
+        _local_model, _local_tokenizer = None, None
 
     print("\n  Mode:")
     print("    [1] Predefined garbage  (standard scenarios)")
@@ -322,8 +387,10 @@ def main():
     tasks = task_map.get(choice, ["task_easy"])
 
     client = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL) if HF_TOKEN else None
-    if not client:
-        print("\n  [INFO] No HF_TOKEN — pure BFS heuristic mode.")
+    if not client and _local_model is None:
+        print("\n  [INFO] No HF_TOKEN and no local model — pure BFS heuristic mode.")
+    elif not client:
+        print("\n  [INFO] No HF_TOKEN — using local Unsloth model + BFS fallback.")
 
     for task_id in tasks:
         print(f"\n{'─'*40}\n  {task_id}\n{'─'*40}")

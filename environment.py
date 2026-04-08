@@ -74,7 +74,7 @@ class GarbageRobotEnv:
         self.robot_position    = list(robot_start)       if robot_start      else list(base_robot)
         self.garbage_positions = [list(g) for g in garbage_positions]   if garbage_positions  is not None else [list(g) for g in base_garbage]
         self.obstacle_positions= [list(o) for o in obstacle_positions]  if obstacle_positions is not None else [list(o) for o in base_obstacles]
-        self.battery_level     = max_battery             if max_battery      else base_battery
+        self.battery_level     = max_battery             if max_battery is not None else base_battery
         self.max_battery       = self.battery_level
         self.inventory_count   = 0
         self.total_reward      = 0.0
@@ -119,7 +119,7 @@ class GarbageRobotEnv:
     def step(self, command: str) -> Dict[str, Any]:
         if self.done:
             obs = self.get_observation("Episode already finished.")
-            return {"observation": obs.model_dump(), "reward": 0.0, "done": True, "info": {}}
+            return {"observation": obs.dict(), "reward": 0.0, "done": True, "info": {}}
 
         reward = -0.1  # small base penalty for taking a step
         message = ""
@@ -189,7 +189,7 @@ class GarbageRobotEnv:
         self.total_reward += reward
 
         return {
-            "observation": self.get_observation(message).model_dump(),
+            "observation": self.get_observation(message).dict(),
             "reward": reward,
             "done": self.done,
             "info": {"inventory_count": self.inventory_count, "steps": self.steps_taken}

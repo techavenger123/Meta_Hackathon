@@ -8,10 +8,6 @@ from datasets import Dataset
 from unsloth import FastLanguageModel
 from trl import SFTTrainer
 from transformers import TrainingArguments
-#try:
-    
-#except ImportError:
-#    print("Unsloth, TRL, or Transformers not installed. Please install unsloth via their official documentation.")
 
 max_seq_length = 2048
 dtype = None # None for auto detection. Float16 for Tesla T4, V100, Bfloat16 for Ampere+
@@ -102,6 +98,8 @@ ENVIRONMENT STATUS:
     return Dataset.from_list(formatted_data)
 
 def main():
+    # NOTE: This trains llama-3-8b. Inference uses Llama-3.2-3B (set via LOCAL_MODEL_PATH).
+    # Ensure the inference model matches the checkpoint you export here if deploying end-to-end.
     print("Loading internal Unsloth libraries and Llama-3-8B-Instruct...")
     try:
         model, tokenizer = FastLanguageModel.from_pretrained(
@@ -111,8 +109,8 @@ def main():
             load_in_4bit=load_in_4bit,
             # token=os.environ.get("HF_TOKEN")
         )
-    except NameError:
-        print("Skipping actual load since dependencies might be missing in this environment.")
+    except Exception as e:
+        print(f"Failed to load model: {e}. Check that Unsloth and dependencies are installed.")
         return
 
     # Add LoRA adapters

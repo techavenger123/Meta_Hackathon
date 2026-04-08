@@ -250,7 +250,7 @@ function nearestNeighbourOrder(start, targets, obstacles, gridW, gridH) {
             }
         }
         ordered.push(nearest);
-        remaining = remaining.filter(t => t !== nearest);
+        remaining = remaining.filter(t => !(t[0] === nearest[0] && t[1] === nearest[1]));
         current = [...nearest];
     }
     return ordered;
