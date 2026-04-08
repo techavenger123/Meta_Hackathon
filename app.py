@@ -124,9 +124,9 @@ def grade(task_id: str):
 
 # ── Policy endpoint (fine-tuned LLM) ──────────────────────────────────────
 
-LOCAL_MODEL_PATH = os.environ.get(
-    "LOCAL_MODEL_PATH",
-    "/home/robotics-mu/.unsloth/studio/exports/unsloth_Llama-3.2-3B-Instruct-bnb-4bit_1775629280"
+HF_MODEL_ID = os.environ.get(
+    "HF_MODEL_ID",
+    "TechAvenger/GarbageBot-Weights"
 )
 
 _policy_model     = None
@@ -140,12 +140,18 @@ def _load_policy():
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer
         import torch
-        _policy_tokenizer = AutoTokenizer.from_pretrained(LOCAL_MODEL_PATH)
+        _policy_tokenizer = AutoTokenizer.from_pretrained(HF_MODEL_ID)
+        
+        # CPU-safe loading adjustment
+        has_cuda = torch.cuda.is_available()
         _policy_model = AutoModelForCausalLM.from_pretrained(
-            LOCAL_MODEL_PATH, torch_dtype=torch.float16, device_map="auto"
+            HF_MODEL_ID,
+            torch_dtype=torch.float16 if has_cuda else torch.float32,
+            device_map="auto" if has_cuda else None,
+            load_in_4bit=has_cuda
         )
         _policy_model.eval()
-        print(f"[Policy] Fine-tuned model loaded from {LOCAL_MODEL_PATH}")
+        print(f"[Policy] Fine-tuned model loaded from {HF_MODEL_ID}")
     except Exception as e:
         print(f"[Policy] Model unavailable: {e}")
     _policy_loaded = True

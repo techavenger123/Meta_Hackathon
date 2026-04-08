@@ -6,6 +6,10 @@ __pycache__/
 *.pyc
 .env
 uv.lock
-test_run.log
-hf_test.log
-hf_test2.log
+*.log
+model/
+GarbageBot-Weights/
+qtable.json
+qtable_backup.json
+server.pid
+train.pid

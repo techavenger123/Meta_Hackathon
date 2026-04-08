@@ -13,6 +13,9 @@ tags:
   - llama-3.2
 ---
 
+> [!NOTE]
+> This Space uses fine-tuned model weights hosted at [TechAvenger/GarbageBot-Weights](https://huggingface.co/TechAvenger/GarbageBot-Weights). The model is loaded in 4-bit precision for efficiency.
+
 # 🤖 Garbage Collecting Robot — OpenEnv
 
 An OpenEnv-compliant reinforcement learning environment for a garbage collecting robot. The agent must navigate a grid room to pick up garbage while managing battery constraints and storage capacity.

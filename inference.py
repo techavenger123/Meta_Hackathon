@@ -9,9 +9,9 @@ API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
 MODEL_NAME   = os.environ.get("MODEL_NAME",   "gpt-4o-mini")
 HF_TOKEN     = os.environ.get("HF_TOKEN",     "")
 ENV_URL      = os.environ.get("ENV_URL",      "http://localhost:7861")
-LOCAL_MODEL_PATH = os.environ.get(
-    "LOCAL_MODEL_PATH",
-    "/home/robotics-mu/.unsloth/studio/exports/unsloth_Llama-3.2-3B-Instruct-bnb-4bit_1775629280"
+HF_MODEL_ID = os.environ.get(
+    "HF_MODEL_ID",
+    "TechAvenger/GarbageBot-Weights"
 )
 
 MAX_STEPS = 200   # raised to account for recharge/unload detours
@@ -451,12 +451,15 @@ def main():
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer
         import torch
-        print(f"\n  [INFO] Loading fine-tuned model from:\n         {LOCAL_MODEL_PATH}")
-        _local_tokenizer = AutoTokenizer.from_pretrained(LOCAL_MODEL_PATH)
+        print(f"\n  [INFO] Loading fine-tuned model from:\n         {HF_MODEL_ID}")
+        _local_tokenizer = AutoTokenizer.from_pretrained(HF_MODEL_ID)
+        # CPU-safe loading adjustment
+        has_cuda = torch.cuda.is_available()
         _local_model = AutoModelForCausalLM.from_pretrained(
-            LOCAL_MODEL_PATH,
-            torch_dtype=torch.float16,
-            device_map="auto",
+            HF_MODEL_ID,
+            torch_dtype=torch.float16 if has_cuda else torch.float32,
+            device_map="auto" if has_cuda else None,
+            load_in_4bit=has_cuda
         )
         _local_model.eval()
         print("  [INFO] Fine-tuned model loaded — used when Q-table misses a state.")
