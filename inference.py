@@ -12,6 +12,14 @@ ENV_URL      = os.environ.get("ENV_URL",      "http://localhost:7861")
 
 MAX_STEPS = 100
 
+from unsloth import FastLanguageModel
+
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name="/home/robotics-mu/.unsloth/studio/outputs/unsloth_Llama-3.2-3B-Instruct-bnb-4bit_1775621239",
+    max_seq_length=2048,
+    load_in_4bit=True,
+)
+FastLanguageModel.for_inference(model)
 # ──────────────────────────────────────────────────────────
 # BFS CORE
 # ──────────────────────────────────────────────────────────
