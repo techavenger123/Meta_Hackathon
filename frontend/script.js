@@ -274,9 +274,26 @@ function getNextOptimalAction(obs) {
 async function stepEnv() {
     if (!currentState) return;
     
-    // In a fully deployed setup, we would hit a `/policy` endpoint that queries the Llama-3 model.
-    // For this dashboard demo, we'll replicate the naive deterministic fallback or random to visualize behavior live!
-    const action = getNextOptimalAction(currentState);
+    // Ask the backend /policy endpoint — runs the fine-tuned Llama-3 model.
+    // Falls back to local JS BFS if the server is unavailable.
+    let action;
+    let actionSource = "bfs";
+    try {
+        const policyRes = await fetch(`${API_BASE}/policy`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message: currentState.message })
+        });
+        if (policyRes.ok) {
+            const pd = await policyRes.json();
+            action = pd.action;
+            actionSource = pd.source || "llm";
+        } else {
+            action = getNextOptimalAction(currentState);
+        }
+    } catch (_) {
+        action = getNextOptimalAction(currentState);
+    }
     
     try {
         const res = await fetch(`${API_BASE}/step`, {
@@ -289,6 +306,7 @@ async function stepEnv() {
         currentState = data.observation;
         renderGrid(currentState);
         updateTelemetry(currentState, data.reward, data.done);
+        addLog(`[${actionSource.toUpperCase()}] → ${action}`);
         
         if (data.done) {
             addLog(`Episode Finished! Total Reward: ${scoreText.textContent}`);

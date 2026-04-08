@@ -11,7 +11,7 @@ HF_TOKEN     = os.environ.get("HF_TOKEN",     "")
 ENV_URL      = os.environ.get("ENV_URL",      "http://localhost:7861")
 LOCAL_MODEL_PATH = os.environ.get(
     "LOCAL_MODEL_PATH",
-    "/home/robotics-mu/.unsloth/studio/outputs/unsloth_Llama-3.2-3B-Instruct-bnb-4bit_1775621239"
+    "/home/robotics-mu/.unsloth/studio/exports/unsloth_Llama-3.2-3B-Instruct-bnb-4bit_1775629280"
 )
 
 MAX_STEPS = 100
@@ -160,20 +160,33 @@ def resolve_next_action(client, obs, context_history, stuck_counter=None) -> str
         f"- Pathfinding suggests: {heuristic}  (only override if clearly wrong)"
     )
 
-    # ── Try local Unsloth model first ──────────────────────────
+    # ── 2. Try local fine-tuned merged model (Alpaca prompt format) ─────
     if _local_model is not None and _local_tokenizer is not None:
         try:
+            # Use the same Alpaca format the model was trained on (code2.py / fixed_dataset.jsonl)
+            alpaca_instruction = (
+                "You are an AI brain controlling a garbage collecting robot.\n"
+                "Reply with EXACTLY ONE of: UP DOWN LEFT RIGHT COLLECT"
+            )
             prompt = (
-                f"{system_prompt}\n\nSTATUS:\n{obs['message']}\n\nCommand:"
+                f"### Instruction:\n{alpaca_instruction}\n\n"
+                f"### Input:\nENVIRONMENT STATUS:\n{obs['message']}\n\n"
+                f"### Response:\n"
             )
-            inputs = _local_tokenizer(prompt, return_tensors="pt").to(_local_model.device)
-            outputs = _local_model.generate(
-                **inputs, max_new_tokens=8, temperature=1.0, do_sample=False
-            )
-            decoded = _local_tokenizer.decode(outputs[0], skip_special_tokens=True)
-            token = decoded.split("Command:")[-1].strip().upper()
+            inputs = _local_tokenizer(
+                prompt, return_tensors="pt", truncation=True, max_length=512
+            ).to(_local_model.device)
+            with __import__('torch').no_grad():
+                outputs = _local_model.generate(
+                    **inputs, max_new_tokens=6, do_sample=False,
+                    pad_token_id=_local_tokenizer.eos_token_id
+                )
+            # Decode only the newly generated tokens
+            new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
+            token = _local_tokenizer.decode(new_tokens, skip_special_tokens=True).strip().upper()
             for valid in ["UP", "DOWN", "LEFT", "RIGHT", "COLLECT"]:
                 if valid in token:
+                    print(f"[LOCAL LLM] {token.split()[0] if token else '?'} (raw: {token!r})")
                     return valid
         except Exception as e:
             print(f"[LOCAL LLM ERROR] {e}")
@@ -355,19 +368,24 @@ def main():
     else:
         print("\n  [WARN] qlearning.py not found — skipping Q-table.")
 
-    # ── 2. Attempt to load local Unsloth model ────────────────
+    # ── 2. Attempt to load the fine-tuned merged model ────────────
+    # The Unsloth Studio export is a full merged model (not a LoRA adapter),
+    # so we load it with standard HuggingFace transformers.
     try:
-        from unsloth import FastLanguageModel
-        print(f"\n  [INFO] Loading local model from: {LOCAL_MODEL_PATH}")
-        _local_model, _local_tokenizer = FastLanguageModel.from_pretrained(
-            model_name=LOCAL_MODEL_PATH,
-            max_seq_length=2048,
-            load_in_4bit=True,
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        import torch
+        print(f"\n  [INFO] Loading fine-tuned model from:\n         {LOCAL_MODEL_PATH}")
+        _local_tokenizer = AutoTokenizer.from_pretrained(LOCAL_MODEL_PATH)
+        _local_model = AutoModelForCausalLM.from_pretrained(
+            LOCAL_MODEL_PATH,
+            torch_dtype=torch.float16,
+            device_map="auto",
         )
-        FastLanguageModel.for_inference(_local_model)
-        print("  [INFO] Local Unsloth model loaded (used when Q-table misses a state).")
+        _local_model.eval()
+        print("  [INFO] Fine-tuned model loaded — used when Q-table misses a state.")
     except Exception as e:
-        print(f"  [WARN] Local model unavailable ({e}). Falling back to remote/heuristic.")
+        print(f"  [WARN] Fine-tuned model unavailable ({e}).")
+        print("          Falling back to remote API / BFS heuristic.")
         _local_model, _local_tokenizer = None, None
 
     print("\n  Mode:")

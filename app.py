@@ -68,7 +68,7 @@ def reset(body: ResetInput = ResetInput()):
     if body.task_id not in VALID_IDS:
         raise HTTPException(400, f"task_id must be one of {sorted(VALID_IDS)}")
     state = env.reset(task_id=body.task_id)
-    return {"observation": env.get_observation().model_dump()}
+    return {"observation": env.get_observation().dict()}
 
 @app.post("/reset_custom", response_model=ResetOutput, tags=["openenv"])
 def reset_custom(body: CustomResetInput):
@@ -103,7 +103,7 @@ def reset_custom(body: CustomResetInput):
         obstacle_positions=body.obstacle_positions,
         max_battery=body.max_battery,
     )
-    return {"observation": env.get_observation().model_dump()}
+    return {"observation": env.get_observation().dict()}
 
 @app.post("/step", response_model=StepOutput, tags=["openenv"])
 def step(body: Action):
@@ -126,7 +126,89 @@ def grade(task_id: str):
     return {"task_id": task_id, "score": score, "reward_range": [0.0, 1.0]}
 
 
-# ── Dynamic garbage placement ──────────────────────────────
+# ── Policy endpoint (fine-tuned LLM) ──────────────────────
+import os as _os
+
+LOCAL_MODEL_PATH = _os.environ.get(
+    "LOCAL_MODEL_PATH",
+    "/home/robotics-mu/.unsloth/studio/exports/unsloth_Llama-3.2-3B-Instruct-bnb-4bit_1775629280"
+)
+
+_policy_model     = None
+_policy_tokenizer = None
+_policy_loaded    = False
+
+def _load_policy():
+    global _policy_model, _policy_tokenizer, _policy_loaded
+    if _policy_loaded:
+        return
+    try:
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        import torch
+        _policy_tokenizer = AutoTokenizer.from_pretrained(LOCAL_MODEL_PATH)
+        _policy_model = AutoModelForCausalLM.from_pretrained(
+            LOCAL_MODEL_PATH, torch_dtype=torch.float16, device_map="auto"
+        )
+        _policy_model.eval()
+        print(f"[Policy] Fine-tuned model loaded from {LOCAL_MODEL_PATH}")
+    except Exception as e:
+        print(f"[Policy] Model unavailable: {e}")
+    _policy_loaded = True
+
+
+class PolicyInput(BaseModel):
+    message: str   # the obs.message string from the environment
+
+@app.post("/policy", tags=["openenv"])
+def policy(body: PolicyInput):
+    """
+    Ask the fine-tuned LLM for the next action.
+    Returns {"action": "UP|DOWN|LEFT|RIGHT|COLLECT", "source": "llm|bfs"}
+    """
+    _load_policy()
+    VALID = ["UP", "DOWN", "LEFT", "RIGHT", "COLLECT"]
+
+    if _policy_model is not None and _policy_tokenizer is not None:
+        try:
+            import torch
+            instruction = (
+                "You are an AI brain controlling a garbage collecting robot.\n"
+                "Reply with EXACTLY ONE of: UP DOWN LEFT RIGHT COLLECT"
+            )
+            prompt = (
+                f"### Instruction:\n{instruction}\n\n"
+                f"### Input:\nENVIRONMENT STATUS:\n{body.message}\n\n"
+                f"### Response:\n"
+            )
+            inputs = _policy_tokenizer(
+                prompt, return_tensors="pt", truncation=True, max_length=512
+            ).to(_policy_model.device)
+            with torch.no_grad():
+                outputs = _policy_model.generate(
+                    **inputs, max_new_tokens=6, do_sample=False,
+                    pad_token_id=_policy_tokenizer.eos_token_id
+                )
+            new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
+            raw = _policy_tokenizer.decode(new_tokens, skip_special_tokens=True).strip().upper()
+            for v in VALID:
+                if v in raw:
+                    return {"action": v, "source": "llm", "raw": raw}
+        except Exception as e:
+            print(f"[Policy] Inference error: {e}")
+
+    # BFS fallback using current env state
+    from inference import heuristic_action
+    obs_dict = {
+        "robot_position":    env.robot_position,
+        "garbage_positions": env.garbage_positions,
+        "obstacle_positions": env.obstacle_positions,
+        "grid_size":         env.grid_size,
+        "message":           body.message,
+    }
+    return {"action": heuristic_action(obs_dict), "source": "bfs"}
+
+
+# ── Dynamic garbage placement ──────────────────────────────────
 from pydantic import BaseModel
 from typing import List, Tuple
 
@@ -162,4 +244,4 @@ def configure(body: ConfigureInput):
 
     env.garbage_positions = validated
 
-    return {"observation": env.get_observation().model_dump()}
+    return {"observation": env.get_observation().dict()}
