@@ -4,73 +4,71 @@ import requests
 import json
 from collections import deque
 from openai import OpenAI
+from typing import List, Optional
 
 API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
 MODEL_NAME   = os.environ.get("MODEL_NAME",   "gpt-4o-mini")
 HF_TOKEN     = os.environ.get("HF_TOKEN",     "")
-# FIX: Match the Dockerfile port (7860) to avoid connection refuse errors during evaluation
 ENV_URL      = os.environ.get("ENV_URL",      "http://localhost:7860")
-HF_MODEL_ID = os.environ.get(
-    "HF_MODEL_ID",
-    "TechAvenger/GarbageBot-Weights"
-)
+HF_MODEL_ID  = os.environ.get("HF_MODEL_ID",  "TechAvenger/GarbageBot-Weights")
+BENCHMARK    = os.environ.get("BENCHMARK",    "garbage_robot_v1")
 
-MAX_STEPS = 200   # raised to account for recharge/unload detours
+MAX_STEPS = 200
 
-# Lazy-loaded local model — populated in main() if Unsloth is available
+# Model artifacts
 _local_model     = None
 _local_tokenizer = None
+_ql_agent        = None
 
-# Q-Learning agent — loaded once in main(), used as primary policy
-_ql_agent = None
 try:
     from qlearning import QLearningAgent
 except ImportError:
     QLearningAgent = None
 
+# ──────────────────────────────────────────────────────────
+# LOGGING HELPERS (Mandatory Format)
+# ──────────────────────────────────────────────────────────
+
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    error_val = error if error else "null"
+    done_val  = str(done).lower()
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}", flush=True)
+
 
 # ──────────────────────────────────────────────────────────
-# BFS CORE
+# BFS & HEURISTIC
 # ──────────────────────────────────────────────────────────
 
 def bfs(start, goal, obstacles, grid_w, grid_h):
-    """
-    BFS from start to goal avoiding obstacles.
-    Returns (first_direction, path_length) or (None, inf) if unreachable.
-    """
     start, goal = tuple(start), tuple(goal)
-    if start == goal:
-        return ("COLLECT", 0)
-
+    if start == goal: return ("COLLECT", 0)
     obstacle_set = frozenset(tuple(o) for o in obstacles)
     dirs = [("RIGHT",(1,0)), ("LEFT",(-1,0)), ("UP",(0,1)), ("DOWN",(0,-1))]
-    queue   = deque([(start, None, 0)])
-    visited = {start}
-
+    queue, visited = deque([(start, None, 0)]), {start}
     while queue:
         pos, first, depth = queue.popleft()
         for name, (dx, dy) in dirs:
             npos = (pos[0]+dx, pos[1]+dy)
-            if not (0 <= npos[0] < grid_w and 0 <= npos[1] < grid_h):
-                continue
-            if npos in obstacle_set or npos in visited:
-                continue
+            if not (0 <= npos[0] < grid_w and 0 <= npos[1] < grid_h): continue
+            if npos in obstacle_set or npos in visited: continue
             move = first if first else name
-            if npos == goal:
-                return (move, depth + 1)
+            if npos == goal: return (move, depth + 1)
             visited.add(npos)
             queue.append((npos, move, depth + 1))
-
     return (None, float('inf'))
 
-
 def nearest_neighbour_order(start, targets, obstacles, grid_w, grid_h):
-    """
-    Orders garbage by nearest-neighbour TSP using actual BFS cost.
-    """
-    remaining = list(targets)
-    ordered   = []
-    current   = tuple(start)
+    remaining, ordered, current = list(targets), [], tuple(start)
     while remaining:
         best = min(remaining, key=lambda t: bfs(current, t, obstacles, grid_w, grid_h)[1])
         ordered.append(best)
@@ -78,15 +76,8 @@ def nearest_neighbour_order(start, targets, obstacles, grid_w, grid_h):
         current = tuple(best)
     return ordered
 
-
-# ──────────────────────────────────────────────────────────
-# HEURISTIC
-# ──────────────────────────────────────────────────────────
-
 def heuristic_action(obs, _stuck_counter=None) -> str:
-    if _stuck_counter is None:
-        _stuck_counter = [0]
-
+    if _stuck_counter is None: _stuck_counter = [0]
     robot_mode     = obs.get("robot_mode", "normal")
     r_pos          = list(obs["robot_position"])
     obstacles      = [list(o) for o in obs["obstacle_positions"]]
@@ -96,7 +87,6 @@ def heuristic_action(obs, _stuck_counter=None) -> str:
         home = obs.get("home_position", r_pos)
         move, _ = bfs(r_pos, home, obstacles, grid_w, grid_h)
         return move or "UP"
-
     if robot_mode == "unloading":
         station = obs.get("unload_station", r_pos)
         move, _ = bfs(r_pos, station, obstacles, grid_w, grid_h)
@@ -104,28 +94,22 @@ def heuristic_action(obs, _stuck_counter=None) -> str:
 
     garbage = [tuple(g) for g in obs["garbage_positions"]]
     if not garbage: return "UP"
-
     if tuple(r_pos) in garbage:
         _stuck_counter[0] = 0
         return "COLLECT"
 
     ordered = nearest_neighbour_order(r_pos, garbage, obstacles, grid_w, grid_h)
-    if _stuck_counter[0] >= 4 and len(ordered) > 1:
-        ordered = [ordered[1], ordered[0]] + ordered[2:]
-    
+    if _stuck_counter[0] >= 4 and len(ordered) > 1: ordered = [ordered[1], ordered[0]] + ordered[2:]
     target = ordered[0]
     move, _ = bfs(r_pos, target, obstacles, grid_w, grid_h)
-    if move and move != "COLLECT":
-        return move
-
-    return "RIGHT"
+    return move or "RIGHT"
 
 
 # ──────────────────────────────────────────────────────────
 # ACTION RESOLVER
 # ──────────────────────────────────────────────────────────
 
-def resolve_next_action(client, obs, context_history, stuck_counter=None) -> str:
+def resolve_next_action(client, obs, stuck_counter=None) -> str:
     heuristic = heuristic_action(obs, stuck_counter)
     if _ql_agent is not None:
         q_action = _ql_agent.get_action(obs)
@@ -141,7 +125,6 @@ def resolve_next_action(client, obs, context_history, stuck_counter=None) -> str
             for valid in ["UP", "DOWN", "LEFT", "RIGHT", "COLLECT"]:
                 if valid in token: return valid
         except Exception: pass
-
     return heuristic
 
 
@@ -149,42 +132,40 @@ def resolve_next_action(client, obs, context_history, stuck_counter=None) -> str
 # EPISODE RUNNER
 # ──────────────────────────────────────────────────────────
 
-def print_log(msg):
-    print(msg, flush=True)
-
 def run_episode(client, task_id, obs):
-    # Minimal START log for validator
-    print_log(f"[START] task={task_id}")
+    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
-    total_reward    = 0.0
-    context_history = []
-    step_idx        = 0
+    rewards         = []
+    steps_taken     = 0
     stuck_counter   = [0]
-
-    for step_idx in range(1, MAX_STEPS + 1):
-        action = resolve_next_action(client, obs, context_history, stuck_counter)
-        try:
-            res = requests.post(f"{ENV_URL}/step", json={"command": action})
-            res.raise_for_status()
-            step_data = res.json()
-        except: break
-
-        obs          = step_data["observation"]
-        reward       = step_data["reward"]
-        done         = step_data["done"]
-        total_reward += reward
-
-        # Minimal STEP log for validator
-        print_log(f"[STEP] step={step_idx} reward={round(reward, 2)} done={done}")
-        if done: break
-        time.sleep(0.01)
+    score           = 0.0
+    success         = False
 
     try:
-        score = requests.get(f"{ENV_URL}/grade/{task_id}").json()["score"]
-    except: score = 0.0
+        for step_idx in range(1, MAX_STEPS + 1):
+            action = resolve_next_action(client, obs, stuck_counter)
+            try:
+                res = requests.post(f"{ENV_URL}/step", json={"command": action})
+                res.raise_for_status()
+                step_data = res.json()
+            except Exception as e:
+                log_step(step=step_idx, action=action, reward=0.0, done=True, error=str(e))
+                break
 
-    # Minimal END log for validator
-    print_log(f"[END] task={task_id} score={score} steps={step_idx}")
+            obs          = step_data["observation"]
+            reward       = step_data["reward"]
+            done         = step_data["done"]
+            rewards.append(reward)
+            steps_taken = step_idx
+
+            log_step(step=step_idx, action=action, reward=reward, done=done, error=None)
+            if done: break
+            time.sleep(0.01)
+
+        score = requests.get(f"{ENV_URL}/grade/{task_id}").json()["score"]
+        success = score >= 0.5
+    finally:
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
     return score
 
 
@@ -194,8 +175,6 @@ def run_episode(client, task_id, obs):
 
 def main():
     global _local_model, _local_tokenizer, _ql_agent
-
-    # Removed descriptive headers to keep stdout clean of anything but validation logs
 
     if QLearningAgent is not None:
         _ql_agent = QLearningAgent()
@@ -219,10 +198,7 @@ def main():
     parser.add_argument("--task", default="all")
     args = parser.parse_args()
 
-    if args.task in ["1", "easy"]: tasks = ["task_easy"]
-    elif args.task in ["2", "medium"]: tasks = ["task_medium"]
-    elif args.task in ["3", "hard"]: tasks = ["task_hard"]
-    else: tasks = ["task_easy", "task_medium", "task_hard"]
+    tasks = ["task_easy", "task_medium", "task_hard"] if args.task == "all" else [f"task_{args.task}" if not args.task.startswith("task_") else args.task]
 
     client = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL) if HF_TOKEN else None
 

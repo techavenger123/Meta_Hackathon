@@ -152,7 +152,6 @@ class QTable:
             else:
                 garbage = ()
             self._q[(rx, ry, garbage)] = v
-        print(f"[Q-Table] Loaded {len(self._q):,} states ← {path}")
         return True
 
     def __len__(self):
