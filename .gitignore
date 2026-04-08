@@ -5,7 +5,7 @@ Robot/
 __pycache__/
 *.pyc
 .env
-uv.lock
+# uv.lock is required for submission
 *.log
 model/
 GarbageBot-Weights/
