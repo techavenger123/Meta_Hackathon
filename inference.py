@@ -14,7 +14,7 @@ LOCAL_MODEL_PATH = os.environ.get(
     "/home/robotics-mu/.unsloth/studio/exports/unsloth_Llama-3.2-3B-Instruct-bnb-4bit_1775629280"
 )
 
-MAX_STEPS = 100
+MAX_STEPS = 200   # raised to account for recharge/unload detours
 
 # Lazy-loaded local model — populated in main() if Unsloth is available
 _local_model     = None
@@ -26,6 +26,8 @@ try:
     from qlearning import QLearningAgent
 except ImportError:
     QLearningAgent = None
+
+
 # ──────────────────────────────────────────────────────────
 # BFS CORE
 # ──────────────────────────────────────────────────────────
@@ -78,19 +80,44 @@ def nearest_neighbour_order(start, targets, obstacles, grid_w, grid_h):
 
 
 # ──────────────────────────────────────────────────────────
-# HEURISTIC — pure BFS, provably never loops
+# HEURISTIC — BFS-based, mode-aware
 # ──────────────────────────────────────────────────────────
 
 def heuristic_action(obs, _stuck_counter=None) -> str:
+    """
+    Pure-BFS heuristic that respects the robot's autonomous mode.
+
+    When the environment reports robot_mode == 'recharging' or 'unloading',
+    the action suggested here is overridden by the environment's own resolver
+    anyway — but we still return a sensible direction so logs are readable.
+
+    In normal mode the heuristic targets the nearest garbage via BFS with a
+    nearest-neighbour tour order, plus a stuck-counter escape hatch.
+    """
     if _stuck_counter is None:
         _stuck_counter = [0]
-    if not obs["garbage_positions"]:
-        return "UP"
 
+    robot_mode     = obs.get("robot_mode", "normal")
     r_pos          = list(obs["robot_position"])
     obstacles      = [list(o) for o in obs["obstacle_positions"]]
     grid_w, grid_h = obs["grid_size"]
-    garbage        = [tuple(g) for g in obs["garbage_positions"]]
+
+    # ── Recharging: head to home ───────────────────────────────
+    if robot_mode == "recharging":
+        home = obs.get("home_position", r_pos)
+        move, _ = bfs(r_pos, home, obstacles, grid_w, grid_h)
+        return move or "UP"
+
+    # ── Unloading: head to unload station ─────────────────────
+    if robot_mode == "unloading":
+        station = obs.get("unload_station", r_pos)
+        move, _ = bfs(r_pos, station, obstacles, grid_w, grid_h)
+        return move or "UP"
+
+    # ── Normal: collect nearest garbage ───────────────────────
+    garbage = [tuple(g) for g in obs["garbage_positions"]]
+    if not garbage:
+        return "UP"   # nothing to do; env will mark episode done
 
     if tuple(r_pos) in garbage:
         _stuck_counter[0] = 0
@@ -98,17 +125,14 @@ def heuristic_action(obs, _stuck_counter=None) -> str:
 
     ordered = nearest_neighbour_order(r_pos, garbage, obstacles, grid_w, grid_h)
 
-    # If stuck for too many steps, try the SECOND-nearest target instead
-    # (breaks out of dead-end loops on task_hard)
+    # Stuck-counter escape: try alternate targets after repeated no-progress steps
     if _stuck_counter[0] >= 4 and len(ordered) > 1:
         ordered = [ordered[1], ordered[0]] + ordered[2:]
     if _stuck_counter[0] >= 8:
-        # Rotate the whole list one more step for a full direction change
         ordered = ordered[1:] + ordered[:1]
         _stuck_counter[0] = 0
 
     target = ordered[0]
-
     if tuple(target) == tuple(r_pos):
         _stuck_counter[0] = 0
         return "COLLECT"
@@ -118,17 +142,17 @@ def heuristic_action(obs, _stuck_counter=None) -> str:
         _stuck_counter[0] = 0
         return move
 
-    # BFS says this target is unreachable — try alternates
+    # Primary target unreachable — try alternates
     for alt in ordered[1:]:
         move, _ = bfs(r_pos, alt, obstacles, grid_w, grid_h)
         if move and move != "COLLECT":
             _stuck_counter[0] = 0
             return move
 
-    # Completely surrounded — take any open neighbour to escape
+    # Fully boxed in: take any open neighbouring cell to escape
     _stuck_counter[0] += 1
     obstacle_set = frozenset(tuple(o) for o in obstacles)
-    for name, (dx, dy) in [("RIGHT",(1,0)), ("LEFT",(-1,0)), ("UP",(0,1)), ("DOWN",(0,-1))]:
+    for name, (dx, dy) in [("RIGHT",(1,0)),("LEFT",(-1,0)),("UP",(0,1)),("DOWN",(0,-1))]:
         npos = (r_pos[0]+dx, r_pos[1]+dy)
         if (0 <= npos[0] < grid_w and 0 <= npos[1] < grid_h
                 and npos not in obstacle_set):
@@ -142,6 +166,18 @@ def heuristic_action(obs, _stuck_counter=None) -> str:
 # ──────────────────────────────────────────────────────────
 
 def resolve_next_action(client, obs, context_history, stuck_counter=None) -> str:
+    """
+    Decide the next action using the priority chain:
+      1. Q-table (trained, deterministic, fastest)
+      2. Fine-tuned local LLM (Unsloth export)
+      3. Remote OpenAI-compatible endpoint
+      4. BFS heuristic (fallback, always works)
+
+    The BFS heuristic is mode-aware and is passed as a hint to the LLM.
+    Note: when the environment is in MODE_RECHARGE or MODE_UNLOAD it will
+    override whatever action we return, so correctness in those modes is
+    the heuristic's responsibility, not the LLM's.
+    """
     heuristic = heuristic_action(obs, stuck_counter)
 
     # ── 1. Q-Learning policy (trained, deterministic) ──────────
@@ -150,20 +186,46 @@ def resolve_next_action(client, obs, context_history, stuck_counter=None) -> str
         if q_action is not None:
             return q_action
 
+    # Build a mode-aware system prompt for the LLM
+    robot_mode   = obs.get("robot_mode", "normal")
+    dist_home    = obs.get("distance_from_home", -1)
+    storage_load = obs.get("current_storage_load", 0)
+    capacity     = obs.get("storage_capacity", 6)
+    home         = obs.get("home_position", (0, 0))
+    station      = obs.get("unload_station", (0, 0))
+
+    mode_note = ""
+    if robot_mode == "recharging":
+        mode_note = (
+            f"\n⚠ ROBOT MODE: RECHARGING — navigate to home {home} "
+            f"({dist_home} steps away). Do NOT collect garbage until recharged."
+        )
+    elif robot_mode == "unloading":
+        mode_note = (
+            f"\n⚠ ROBOT MODE: UNLOADING — navigate to unload station {station}. "
+            f"Storage is full ({storage_load}/{capacity}). "
+            f"Do NOT collect garbage until unloaded."
+        )
+    else:
+        mode_note = (
+            f"\nBattery distance to home: {dist_home} steps. "
+            f"Storage: {storage_load}/{capacity}."
+        )
+
     system_prompt = (
         "You control a garbage collecting robot on a grid.\n"
         "Reply with EXACTLY ONE of: UP  DOWN  LEFT  RIGHT  COLLECT\n\n"
         "Rules:\n"
         "- COLLECT only when your position exactly matches a garbage position.\n"
         "- Never move into an obstacle tile.\n"
-        "- Move toward the nearest reachable garbage.\n"
+        "- The environment handles recharging and unloading automatically.\n"
         f"- Pathfinding suggests: {heuristic}  (only override if clearly wrong)"
+        f"{mode_note}"
     )
 
     # ── 2. Try local fine-tuned merged model (Alpaca prompt format) ─────
     if _local_model is not None and _local_tokenizer is not None:
         try:
-            # Use the same Alpaca format the model was trained on (code2.py / fixed_dataset.jsonl)
             alpaca_instruction = (
                 "You are an AI brain controlling a garbage collecting robot.\n"
                 "Reply with EXACTLY ONE of: UP DOWN LEFT RIGHT COLLECT"
@@ -181,7 +243,6 @@ def resolve_next_action(client, obs, context_history, stuck_counter=None) -> str
                     **inputs, max_new_tokens=6, do_sample=False,
                     pad_token_id=_local_tokenizer.eos_token_id
                 )
-            # Decode only the newly generated tokens
             new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
             token = _local_tokenizer.decode(new_tokens, skip_special_tokens=True).strip().upper()
             for valid in ["UP", "DOWN", "LEFT", "RIGHT", "COLLECT"]:
@@ -191,7 +252,7 @@ def resolve_next_action(client, obs, context_history, stuck_counter=None) -> str
         except Exception as e:
             print(f"[LOCAL LLM ERROR] {e}")
 
-    # ── Try remote OpenAI-compatible endpoint ─────────────────
+    # ── 3. Try remote OpenAI-compatible endpoint ─────────────────
     if client is not None:
         try:
             response = client.chat.completions.create(
@@ -211,18 +272,18 @@ def resolve_next_action(client, obs, context_history, stuck_counter=None) -> str
         except Exception as e:
             print(f"[REMOTE LLM ERROR] {e}")
 
-    # ── Final fallback: pure BFS heuristic ────────────────────
+    # ── 4. Final fallback: pure BFS heuristic ─────────────────
     return heuristic
 
 
 # ──────────────────────────────────────────────────────────
-# DYNAMIC GARBAGE PLACEMENT
+# INTERACTIVE GARBAGE PLACEMENT
 # ──────────────────────────────────────────────────────────
 
 def prompt_custom_garbage(grid_w, grid_h, obstacles):
     """
-    Interactive CLI — lets you place garbage tiles before each episode.
-    Supports: manual 'x,y' | 'random N' | 'done'
+    Interactive CLI helper: prompts the user to enter garbage positions
+    for a dynamic episode.
     """
     obstacle_set = set(tuple(o) for o in obstacles)
     print(f"\n  Grid: {grid_w} x {grid_h}   Obstacles: {sorted(obstacle_set)}")
@@ -298,8 +359,12 @@ def print_log(log_dict):
 
 
 def run_episode(client, task_id, obs):
-    policy = "q-table" if (_ql_agent and _ql_agent.loaded) else \
-             ("local-llm" if _local_model else ("remote-llm" if client else "bfs"))
+    policy = (
+        "q-table"    if (_ql_agent and _ql_agent.loaded)  else
+        "local-llm"  if _local_model                      else
+        "remote-llm" if client                            else
+        "bfs"
+    )
     print_log({"type": "[START]", "task_id": task_id,
                "model": MODEL_NAME, "policy": policy, "max_steps": MAX_STEPS})
 
@@ -307,7 +372,7 @@ def run_episode(client, task_id, obs):
     done            = False
     context_history = []
     step_idx        = 0
-    stuck_counter   = [0]  # per-episode counter — no cross-episode state leak
+    stuck_counter   = [0]   # per-episode; no cross-episode state leak
 
     for step_idx in range(1, MAX_STEPS + 1):
         action = resolve_next_action(client, obs, context_history, stuck_counter)
@@ -323,11 +388,25 @@ def run_episode(client, task_id, obs):
         obs          = step_data["observation"]
         reward       = step_data["reward"]
         done         = step_data["done"]
+        info         = step_data.get("info", {})
         total_reward += reward
 
-        print_log({"type": "[STEP]", "step": step_idx, "action": action,
-                   "reward": round(reward, 2), "total_reward": round(total_reward, 2),
-                   "done": done})
+        # Log includes autonomous-override details for debugging
+        log_entry = {
+            "type":           "[STEP]",
+            "step":           step_idx,
+            "action":         action,
+            "effective":      info.get("effective_command", action),
+            "overridden":     info.get("autonomous_override", False),
+            "mode":           obs.get("robot_mode", "normal"),
+            "battery":        obs.get("battery_level"),
+            "storage":        f"{obs.get('current_storage_load')}/{obs.get('storage_capacity')}",
+            "dist_home":      obs.get("distance_from_home"),
+            "reward":         round(reward, 2),
+            "total_reward":   round(total_reward, 2),
+            "done":           done,
+        }
+        print_log(log_entry)
 
         if done:
             break
@@ -369,8 +448,6 @@ def main():
         print("\n  [WARN] qlearning.py not found — skipping Q-table.")
 
     # ── 2. Attempt to load the fine-tuned merged model ────────────
-    # The Unsloth Studio export is a full merged model (not a LoRA adapter),
-    # so we load it with standard HuggingFace transformers.
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer
         import torch
@@ -390,13 +467,14 @@ def main():
 
     import argparse
     parser = argparse.ArgumentParser(description="Run GarbageBot Inference")
-    parser.add_argument("--dynamic", action="store_true", help="Interactive dynamic garbage placement")
-    parser.add_argument("--task", choices=["1", "2", "3", "4", "easy", "medium", "hard", "all"], default="all", 
+    parser.add_argument("--dynamic", action="store_true",
+                        help="Interactive dynamic garbage placement")
+    parser.add_argument("--task",
+                        choices=["1","2","3","4","easy","medium","hard","all"],
+                        default="all",
                         help="Task to run: 'easy', 'medium', 'hard', or 'all'")
     args = parser.parse_args()
 
-    dynamic = args.dynamic
-    
     if args.task in ["1", "easy"]:
         tasks = ["task_easy"]
     elif args.task in ["2", "medium"]:
@@ -405,7 +483,7 @@ def main():
         tasks = ["task_hard"]
     else:
         tasks = ["task_easy", "task_medium", "task_hard"]
-    
+
     print(f"\n  [INFO] Running tasks: {', '.join(tasks)}")
 
     client = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL) if HF_TOKEN else None
@@ -425,7 +503,7 @@ def main():
             print(f"Reset failed: {e}")
             continue
 
-        if dynamic:
+        if args.dynamic:
             garbage = prompt_custom_garbage(
                 base_obs["grid_size"][0],
                 base_obs["grid_size"][1],

@@ -1,3 +1,4 @@
-Unsloth, TRL, or Transformers not installed. Please install unsloth via their official documentation.
-Loading internal Unsloth libraries and Llama-3-8B-Instruct...
-Skipping actual load since dependencies might be missing in this environment.
+Traceback (most recent call last):
+  File "/home/robotics-mu/Downloads/Meta Hackathon/train_unsloth.py", line 13, in <module>
+    from datasets import Dataset
+ModuleNotFoundError: No module named 'datasets'

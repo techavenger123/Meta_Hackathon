@@ -1,6 +1,13 @@
 """
 FastAPI server for the Garbage Collecting Robot OpenEnv environment.
 Exposes reset / step / state / tasks / grade / policy / configure endpoints.
+
+Fix applied:
+  - /policy BFS fallback now uses env.get_observation().dict() instead of
+    a hand-built incomplete dict (which was missing robot_mode, home_position,
+    unload_station, current_storage_load, storage_capacity, distance_from_home).
+  - Static files and /ui route added so the HTML dashboard is served from the
+    same origin — required for HuggingFace Spaces deployment.
 """
 
 import os
@@ -11,6 +18,8 @@ from typing import List
 from pydantic import BaseModel
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from environment import GarbageRobotEnv
 from models import (
@@ -78,24 +87,6 @@ def reset_custom(body: CustomResetInput):
     Dynamic reset endpoint. Lets callers specify garbage positions,
     obstacle positions, robot start, grid size and battery at runtime.
     Any omitted field falls back to the base scenario's value.
-
-    Example — drop 3 garbage tiles on a 7x7 medium base:
-    POST /reset_custom
-    {
-      "task_id": "task_medium",
-      "garbage_positions": [[0,6],[6,0],[3,3]]
-    }
-
-    Example — fully custom blank grid:
-    POST /reset_custom
-    {
-      "task_id": "custom",
-      "grid_size": [8,8],
-      "robot_start": [0,0],
-      "garbage_positions": [[7,7],[4,4]],
-      "obstacle_positions": [[2,2],[2,3],[3,2]],
-      "max_battery": 50
-    }
     """
     env.reset_custom(
         task_id=body.task_id,
@@ -104,6 +95,9 @@ def reset_custom(body: CustomResetInput):
         garbage_positions=body.garbage_positions,
         obstacle_positions=body.obstacle_positions,
         max_battery=body.max_battery,
+        storage_capacity=body.storage_capacity,
+        home_position=body.home_position,
+        unload_station=body.unload_station,
     )
     return {"observation": env.get_observation().dict()}
 
@@ -128,7 +122,7 @@ def grade(task_id: str):
     return {"task_id": task_id, "score": score, "reward_range": [0.0, 1.0]}
 
 
-# ── Policy endpoint (fine-tuned LLM) ──────────────────────
+# ── Policy endpoint (fine-tuned LLM) ──────────────────────────────────────
 
 LOCAL_MODEL_PATH = os.environ.get(
     "LOCAL_MODEL_PATH",
@@ -197,19 +191,16 @@ def policy(body: PolicyInput):
         except Exception as e:
             print(f"[Policy] Inference error: {e}")
 
-    # BFS fallback using current env state
+    # FIX: use env.get_observation().dict() so heuristic_action() receives
+    # all required fields (robot_mode, home_position, unload_station, etc.)
+    # instead of the previous hand-built incomplete dict.
     from inference import heuristic_action
-    obs_dict = {
-        "robot_position":    env.robot_position,
-        "garbage_positions": env.garbage_positions,
-        "obstacle_positions": env.obstacle_positions,
-        "grid_size":         env.grid_size,
-        "message":           body.message,
-    }
+    obs_dict = env.get_observation().dict()
+    obs_dict["message"] = body.message   # use the caller's message for context
     return {"action": heuristic_action(obs_dict), "source": "bfs"}
 
 
-# ── Dynamic garbage placement ──────────────────────────────
+# ── Dynamic garbage placement ──────────────────────────────────────────────
 
 class ConfigureInput(BaseModel):
     task_id: str = "task_easy"
@@ -219,16 +210,13 @@ class ConfigureInput(BaseModel):
 def configure(body: ConfigureInput):
     """
     Reset the environment for task_id, then override garbage positions
-    with whatever the caller supplies. Obstacles and grid size come from
-    the standard scenario; only garbage is dynamic.
+    with whatever the caller supplies.
     """
     if body.task_id not in VALID_IDS:
         raise HTTPException(400, f"task_id must be one of {sorted(VALID_IDS)}")
 
-    # Standard reset first (sets grid, obstacles, battery)
     env.reset(task_id=body.task_id)
 
-    # Validate and override garbage positions
     validated = []
     for pos in body.garbage_positions:
         if len(pos) != 2:
@@ -244,3 +232,22 @@ def configure(body: ConfigureInput):
     env.garbage_positions = validated
 
     return {"observation": env.get_observation().dict()}
+
+
+# ── Serve HTML dashboard ───────────────────────────────────────────────────
+# This makes the frontend accessible at /ui on the same origin as the API,
+# which is required for HuggingFace Spaces (no localhost cross-origin issues).
+
+@app.get("/ui", include_in_schema=False)
+def ui():
+    """Serve the dashboard HTML."""
+    return FileResponse("frontend/index.html")
+
+# Mount static assets (style.css, script.js) at /static
+if os.path.exists("frontend/style.css") or os.path.exists("frontend/script.js"):
+    app.mount("/static", StaticFiles(directory="frontend"), name="static")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=7860)

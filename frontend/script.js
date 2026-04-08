@@ -1,9 +1,18 @@
 /* ═══════════════════════════════════════════════════════
    GarbageBot — Continuous-World Dashboard Logic
    Policy chain: Fine-tuned LLM → Q-table → BFS fallback
+
+   Fix applied:
+     - API_BASE was hardcoded to "http://localhost:7861" which breaks on any
+       hosted environment (HuggingFace Spaces, cloud VMs, etc.).
+       Now uses a relative empty string "" so every fetch goes to the same
+       origin that served the page — works locally and in production without
+       any code change.
    ═══════════════════════════════════════════════════════ */
 
-const API_BASE = "http://localhost:7861";
+// FIX: use relative paths ("") instead of hardcoded "http://localhost:7861"
+// so the dashboard works on HuggingFace Spaces and any other host automatically.
+const API_BASE = "";
 
 // ── DOM ───────────────────────────────────────────────────
 const statusDot        = document.getElementById("status-dot");
@@ -29,6 +38,11 @@ const episodeScoreChip = document.getElementById("episode-score-chip");
 const logFeed          = document.getElementById("log-feed");
 const rewardCanvas     = document.getElementById("reward-chart");
 
+const modePill         = document.getElementById("mode-pill");
+const modeLabel        = document.getElementById("mode-label");
+const storageProgress  = document.getElementById("storage-progress");
+const storageText      = document.getElementById("storage-text");
+
 // ── State ─────────────────────────────────────────────────
 let autoMode      = false;
 let autoTimer     = null;
@@ -39,6 +53,7 @@ let totalReward   = 0;
 let rewardHistory = [];
 let maxBattery    = 30;
 let stepDelay     = 500;
+let lastMode      = "normal";
 
 // World dimensions (set on reset)
 let WORLD_W = 5, WORLD_H = 5;
@@ -48,14 +63,12 @@ const CELL = 52;   // must match CSS --cell
 speedSlider.addEventListener("input", () => {
     stepDelay = parseInt(speedSlider.value);
     speedVal.textContent = `${stepDelay}ms`;
-    // Update slider gradient fill
     const pct = ((stepDelay - 100) / 1400) * 100;
     speedSlider.style.background = `linear-gradient(90deg, var(--blue) ${pct}%, rgba(255,255,255,.15) ${pct}%)`;
     syncRobotTransition();
     if (autoMode) { clearInterval(autoTimer); autoTimer = setInterval(stepEnv, stepDelay); }
 });
 
-// Keep robot transition duration slightly under step delay
 function syncRobotTransition() {
     if (!robotEntity) return;
     envGrid.style.setProperty("--move-dur", `${stepDelay}ms`);
@@ -96,7 +109,6 @@ function drawChart() {
     const step = W / (rewardHistory.length - 1);
     const pts  = rewardHistory.map((v, i) => [i * step, H - ((v + maxR) / (2 * maxR)) * H]);
 
-    // Fill
     const grad = ctx.createLinearGradient(0, 0, 0, H);
     grad.addColorStop(0, "rgba(59,158,255,.5)");
     grad.addColorStop(1, "rgba(59,158,255,0)");
@@ -106,13 +118,11 @@ function drawChart() {
     ctx.lineTo(0, H); ctx.closePath();
     ctx.fillStyle = grad; ctx.fill();
 
-    // Line
     ctx.beginPath();
     pts.forEach(([x, y], i) => i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y));
     ctx.strokeStyle = "#3b9eff"; ctx.lineWidth = 2;
     ctx.lineJoin = "round"; ctx.stroke();
 
-    // Latest dot
     const [lx, ly] = pts[pts.length-1];
     ctx.beginPath(); ctx.arc(lx, ly, 3.5, 0, Math.PI*2);
     ctx.fillStyle = "#a5c8ff"; ctx.fill();
@@ -150,13 +160,11 @@ function addTrail(left, top) {
 }
 
 // ── World coordinates ─────────────────────────────────────
-// Grid origin is at top-left of envGrid; y-axis is flipped (0 = bottom)
-function wx(x)     { return x * CELL; }
-function wy(y, H)  { return (H - 1 - y) * CELL; }
+function wx(x)    { return x * CELL; }
+function wy(y, H) { return (H - 1 - y) * CELL; }
 
 // ── Direction → emoji ─────────────────────────────────────
 const DIR_EMOJI = { UP:"🤖", DOWN:"🤖", LEFT:"🤖", RIGHT:"🤖", COLLECT:"🤖" };
-// Could use arrows but robot emoji is cleaner; direction handled by trail
 
 // ── Grid render ───────────────────────────────────────────
 function renderGrid(obs, isReset = false) {
@@ -171,8 +179,6 @@ function renderGrid(obs, isReset = false) {
         envGrid.style.height = `${worldPy}px`;
         envGrid.style.gridTemplateColumns = `repeat(${W}, ${CELL}px)`;
         envGrid.style.gridTemplateRows    = `repeat(${H}, ${CELL}px)`;
-
-        // Background tile lines aligned to CELL size
         envGrid.style.backgroundSize = `${CELL}px ${CELL}px, ${CELL}px ${CELL}px, 100% 100%`;
 
         // Transparent click-target cells
@@ -206,10 +212,35 @@ function renderGrid(obs, isReset = false) {
         robotEntity.style.left   = `${wx(obs.robot_position[0])}px`;
         robotEntity.style.top    = `${wy(obs.robot_position[1], H)}px`;
         envGrid.appendChild(robotEntity);
+
+        // ⚡ Home Station
+        if (obs.home_position) {
+            const home = document.createElement("div");
+            home.className = "world-home";
+            home.style.left = `${wx(obs.home_position[0])}px`;
+            home.style.top  = `${wy(obs.home_position[1], H)}px`;
+            envGrid.appendChild(home);
+        }
+
+        // 📦 Unload Station
+        if (obs.unload_station) {
+            const unload = document.createElement("div");
+            unload.className = "world-unload";
+            unload.style.left = `${wx(obs.unload_station[0])}px`;
+            unload.style.top  = `${wy(obs.unload_station[1], H)}px`;
+            envGrid.appendChild(unload);
+        }
+
+        // Particle layer on top
+        const pl = document.createElement("div");
+        pl.id = "particle-layer";
+        pl.className = "particle-layer";
+        envGrid.appendChild(pl);
+
         syncRobotTransition();
     }
 
-    // Continuous robot move without ghost trails
+    // Continuous robot move
     if (robotEntity) {
         const nl = wx(obs.robot_position[0]);
         const nt = wy(obs.robot_position[1], H);
@@ -230,6 +261,8 @@ function renderGrid(obs, isReset = false) {
         el.addEventListener("click", () => toggleGarbage(x, y));
         envGrid.appendChild(el);
     });
+
+    addLog(obs.message, "sys");
 }
 
 // ── Telemetry ─────────────────────────────────────────────
@@ -243,7 +276,34 @@ function updateTelemetry(obs, reward, done) {
     else if (pct > 25) batteryProgress.style.background = "#fbbf24";
     else               batteryProgress.style.background = "#fb7185";
 
-    inventoryText.textContent = obs.inventory_count;
+    // Storage update
+    if (obs.storage_capacity) {
+        const sPct = (obs.current_storage_load / obs.storage_capacity) * 100;
+        storageProgress.style.width      = `${sPct}%`;
+        storageProgress.style.background = sPct >= 100 ? "#f59e0b" : "#60a5fa";
+        storageText.textContent          = `${obs.current_storage_load} / ${obs.storage_capacity}`;
+    }
+
+    // Inventory (total collected)
+    if (inventoryText) {
+        inventoryText.textContent = obs.inventory_count ?? 0;
+    }
+
+    // Mode updates
+    const mode = obs.robot_mode || "normal";
+    if (mode !== lastMode) {
+        addLog(`Robot mode changed to: ${mode.toUpperCase()}`, "sys");
+        lastMode = mode;
+    }
+    modeLabel.textContent = mode.toUpperCase();
+
+    modePill.classList.remove("normal", "recharging", "unloading");
+    modePill.classList.add(mode);
+
+    if (robotEntity) {
+        robotEntity.classList.remove("recharging", "unloading");
+        if (mode !== "normal") robotEntity.classList.add(mode);
+    }
 
     if (reward !== undefined) {
         totalReward += reward;
@@ -255,7 +315,6 @@ function updateTelemetry(obs, reward, done) {
     }
 
     stepCounter.textContent = `Step ${stepCount}`;
-    addLog(obs.message, "sys");
 }
 
 // ── Policy badge ──────────────────────────────────────────
@@ -267,7 +326,7 @@ const POLICY_STYLES = {
 };
 function showPolicy(source, action) {
     const s = POLICY_STYLES[source] || POLICY_STYLES.sys;
-    policyLabel.textContent      = `${source.replace("_","-").toUpperCase()} → ${action}`;
+    policyLabel.textContent       = `${source.replace("_","-").toUpperCase()} → ${action}`;
     policyBadge.style.borderColor = s.border;
     policyBadge.style.color       = s.color;
     policyBadge.classList.add("active");
@@ -373,7 +432,7 @@ async function resetEnv() {
     } catch (e) {
         statusDot.className     = "pulse-dot";
         statusLabel.textContent = "Offline";
-        addLog(`Cannot reach ${API_BASE} — is app.py running?`, "sys");
+        addLog(`Cannot reach server — is app.py running?`, "sys");
     }
 }
 

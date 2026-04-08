@@ -8,7 +8,9 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
+    <!-- Use /static/ prefix so FastAPI's StaticFiles middleware serves these correctly
+         on HuggingFace Spaces and any other hosted environment. -->
+    <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
     <!-- Animated background -->
@@ -40,6 +42,9 @@
                 <div class="policy-badge" id="policy-badge">
                     <span class="badge-icon">⚡</span>
                     <span id="policy-label">–</span>
+                </div>
+                <div class="status-pill" id="mode-pill">
+                    <span id="mode-label">NORMAL</span>
                 </div>
             </div>
 
@@ -101,10 +106,23 @@
                     </div>
 
                     <div class="stat-row">
+                        <div class="stat-icon">📦</div>
+                        <div class="stat-body">
+                            <div class="stat-label-row">
+                                <span class="stat-label">Storage</span>
+                                <span id="storage-text" class="stat-num">–</span>
+                            </div>
+                            <div class="progress-track">
+                                <div class="progress-fill" id="storage-progress" style="width: 0%; background: var(--warning);"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="stat-row">
                         <div class="stat-icon">🗑️</div>
                         <div class="stat-body">
                             <div class="stat-label-row">
-                                <span class="stat-label">Collected</span>
+                                <span class="stat-label">Total Collected</span>
                                 <span id="inventory-text" class="stat-num big-num">0</span>
                             </div>
                         </div>
@@ -143,6 +161,6 @@
 
     </div><!-- /dashboard -->
 
-    <script src="script.js"></script>
+    <script src="/static/script.js"></script>
 </body>
 </html>

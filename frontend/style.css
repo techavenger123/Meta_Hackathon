@@ -194,6 +194,16 @@ h1 {
 .policy-badge.active { border-color:rgba(59,130,246,.5); box-shadow:0 0 12px rgba(59,130,246,.1); }
 .badge-icon { font-size:.9rem; }
 
+#mode-pill {
+    background: rgba(255, 255, 255, 0.8);
+    color: var(--text-muted);
+    font-weight: 700;
+    transition: all 0.3s ease;
+}
+#mode-pill.recharging { background: var(--blue); color: #fff; box-shadow: 0 0 12px var(--blue-glow); }
+#mode-pill.unloading { background: var(--warning); color: #fff; box-shadow: 0 0 12px var(--warning-glow); }
+#mode-pill.normal { background: rgba(0, 0, 0, 0.05); color: var(--text-muted); }
+
 /* Controls */
 .controls { display:flex; gap:.65rem; align-items:center; flex-wrap:wrap; }
 
@@ -419,6 +429,32 @@ main {
     50%    { transform:translateY(-4px); }
 }
 
+/* ── STATIONS ───────────────────────────────────────────── */
+.world-home, .world-unload {
+    position: absolute;
+    width: var(--cell); height: var(--cell);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.2rem;
+    border-radius: 4px;
+    z-index: 5;
+    pointer-events: none;
+}
+.world-home {
+    background: rgba(59, 130, 246, 0.08);
+    border: 2px dashed rgba(59, 130, 246, 0.3);
+}
+.world-home::before {
+    content: '⚡'; filter: drop-shadow(0 0 8px var(--blue));
+}
+
+.world-unload {
+    background: rgba(245, 158, 11, 0.08);
+    border: 2px dashed rgba(245, 158, 11, 0.3);
+}
+.world-unload::before {
+    content: '📦'; filter: drop-shadow(0 0 8px var(--warning));
+}
+
 /* ── ROBOT ───────────────────────────────────────────────── */
 .robot-entity {
     position:absolute; z-index:30;
@@ -435,11 +471,22 @@ main {
         0 0 0 1px rgba(59,130,246,.2),
         0 4px 12px rgba(59,130,246,.3),
         0 8px 24px rgba(15,23,42,.2);
-    /* smooth physical movement */
+    
     transition:
         left   var(--move-dur,350ms) linear,
-        top    var(--move-dur,350ms) linear;
+        top    var(--move-dur,350ms) linear,
+        background 0.4s ease,
+        box-shadow 0.4s ease;
     will-change: left, top;
+}
+
+.robot-entity.recharging { 
+    background: linear-gradient(145deg, #3b82f6, #60a5fa); 
+    box-shadow: 0 0 20px var(--blue-glow);
+}
+.robot-entity.unloading { 
+    background: linear-gradient(145deg, #f59e0b, #fbbf24); 
+    box-shadow: 0 0 20px var(--warning-glow);
 }
 /* top highlight */
 .robot-entity::before {

@@ -1,5 +1,5 @@
 #!/bin/sh
-'''exec' "/home/robotics-mu/Documents/Meta Hackathon/venv/bin/python3" "$0" "$@"
+'''exec' "/home/robotics-mu/Downloads/Meta Hackathon/venv/bin/python3.10" "$0" "$@"
 ' '''
 # -*- coding: utf-8 -*-
 import re

@@ -17,11 +17,19 @@ Usage:
 
     # Evaluate silently (uses saved Q-table)
     python3 qlearning.py --eval
+
+Fix applied:
+    - load() previously had two separate key-reconstruction passes, where the
+      first pass result (variable `k`) was computed but then immediately discarded.
+      The second pass also misidentified the garbage sub-list when it had exactly
+      2 integer elements (treating [gx, gy] pairs as flat coords instead of a
+      tuple-of-tuples). Replaced both passes with a single, unambiguous decode:
+        parsed = [rx, ry, [[gx1,gy1],[gx2,gy2],...]]
+      where the third element is always the nested garbage list.
 """
 
 import os
 import json
-import math
 import random
 import argparse
 from collections import defaultdict
@@ -36,29 +44,25 @@ Q_TABLE_PATH = os.environ.get("Q_TABLE_PATH", "qtable.json")
 
 # ── Hyperparameters ─────────────────────────────────────────────────────────
 
-ALPHA         = 0.15    # learning rate
-GAMMA         = 0.97    # discount factor — high so the agent plans many steps ahead
-EPSILON_START = 1.0     # full exploration at the start
-EPSILON_END   = 0.05    # minimum exploration floor
-EPSILON_DECAY = 0.9995  # multiplicative decay per episode
+ALPHA         = 0.15
+GAMMA         = 0.97
+EPSILON_START = 1.0
+EPSILON_END   = 0.05
+EPSILON_DECAY = 0.9995
 
 
 # ── State Encoding ──────────────────────────────────────────────────────────
 
 def encode_state(obs: dict) -> tuple:
     """
-    Convert a raw observation dict (from env.step or env.get_observation)
-    into a hashable tuple suitable as a Q-table key.
+    Convert a raw observation dict into a hashable tuple suitable as a Q-table key.
 
-    We include:
-      - robot position (x, y)
-      - sorted garbage positions (so order doesn't create phantom new states)
-
-    Obstacles and grid size are fixed per task — no need to encode them.
+    Key structure: (robot_x, robot_y, ((gx1,gy1),(gx2,gy2),...))
+    Garbage positions are sorted so order doesn't create phantom new states.
     """
     rx, ry = obs["robot_position"]
     garbage = tuple(sorted((int(g[0]), int(g[1])) for g in obs["garbage_positions"]))
-    return (rx, ry, garbage)
+    return (int(rx), int(ry), garbage)
 
 
 # ── Q-Table ─────────────────────────────────────────────────────────────────
@@ -71,8 +75,7 @@ class QTable:
 
     def __init__(self, optimistic_init: float = 0.5):
         self.optimistic_init = optimistic_init
-        # q[state][action_index] = Q-value
-        self._q: dict[tuple, list[float]] = {}
+        self._q: dict = {}
 
     def _ensure(self, state: tuple):
         if state not in self._q:
@@ -98,33 +101,57 @@ class QTable:
     # ── Persistence ─────────────────────────────────────────────────────────
 
     def save(self, path: str = Q_TABLE_PATH):
-        # JSON requires string keys; encode tuples as strings
-        serialisable = {json.dumps(list(k)): v for k, v in self._q.items()}
+        """
+        Serialise Q-table to JSON.
+
+        Key format saved to disk:
+            [rx, ry, [[gx1,gy1], [gx2,gy2], ...]]
+        This is unambiguous: element 0 and 1 are ints, element 2 is always a
+        list-of-lists, even when there is only one garbage piece.
+        """
+        serialisable = {}
+        for (rx, ry, garbage), v in self._q.items():
+            key = json.dumps([rx, ry, [list(g) for g in garbage]])
+            serialisable[key] = v
         with open(path, "w") as f:
             json.dump(serialisable, f)
         print(f"[Q-Table] Saved {len(self._q):,} states → {path}")
 
     def load(self, path: str = Q_TABLE_PATH) -> bool:
+        """
+        Load Q-table from JSON.
+
+        FIX: The previous implementation had two redundant key-reconstruction
+        loops. The first built variable `k` which was immediately discarded;
+        the second pass misclassified [gx, gy] pairs (lists of 2 ints) as flat
+        coordinates rather than garbage-position tuples, corrupting multi-garbage
+        states.
+
+        New single-pass decode relies on the unambiguous 3-element structure:
+            parsed[0] = rx  (int)
+            parsed[1] = ry  (int)
+            parsed[2] = [[gx1,gy1], ...]  (always a list-of-lists)
+        """
         if not os.path.exists(path):
             return False
         with open(path, "r") as f:
             raw = json.load(f)
         self._q = {}
         for k_str, v in raw.items():
-            k = tuple(
-                tuple(x) if isinstance(x, list) else x
-                for x in json.loads(k_str)
-            )
-            # Nested garbage tuple: last element is a list of [x,y] pairs
-            rebuilt = []
-            for elem in json.loads(k_str):
-                if isinstance(elem, list) and len(elem) == 2 and all(isinstance(e, int) for e in elem):
-                    rebuilt.append(tuple(elem))  # flat [x, y] → (x, y)
-                elif isinstance(elem, list):
-                    rebuilt.append(tuple(tuple(p) for p in elem))  # nested garbage tuples
-                else:
-                    rebuilt.append(elem)
-            self._q[tuple(rebuilt)] = v
+            parsed = json.loads(k_str)
+            # Robustly handle both new format [rx, ry, [[gx,gy],...]]
+            # and old format [rx, ry, [gx, gy]] (single garbage, flat list).
+            rx, ry = int(parsed[0]), int(parsed[1])
+            raw_garbage = parsed[2]
+            if raw_garbage and isinstance(raw_garbage[0], list):
+                # New / multi-garbage format: [[gx1,gy1],[gx2,gy2],...]
+                garbage = tuple(tuple(p) for p in raw_garbage)
+            elif raw_garbage and isinstance(raw_garbage[0], int):
+                # Old single-garbage flat format: [gx, gy]
+                garbage = (tuple(raw_garbage),)
+            else:
+                garbage = ()
+            self._q[(rx, ry, garbage)] = v
         print(f"[Q-Table] Loaded {len(self._q):,} states ← {path}")
         return True
 
@@ -134,34 +161,32 @@ class QTable:
 
 # ── Observation Helper ───────────────────────────────────────────────────────
 
-def _obs_from_step(step_result: dict) -> dict:
-    """Unpack observation from env.step() return dict (already a plain dict)."""
-    return step_result["observation"]
-
-
 def _obs_from_env(env) -> dict:
-    """
-    Build an obs dict directly from GarbageRobotEnv fields.
-    Avoids calling .model_dump()/.dict() since the Pydantic version may vary.
-    """
+    """Build an obs dict directly from GarbageRobotEnv fields."""
     obs_obj = env.get_observation()
     return {
-        "robot_position":    obs_obj.robot_position,
-        "garbage_positions": list(obs_obj.garbage_positions),
+        "robot_position":     obs_obj.robot_position,
+        "garbage_positions":  list(obs_obj.garbage_positions),
         "obstacle_positions": list(obs_obj.obstacle_positions),
-        "grid_size":         obs_obj.grid_size,
-        "battery_level":     obs_obj.battery_level,
-        "inventory_count":   obs_obj.inventory_count,
-        "message":           obs_obj.message,
+        "grid_size":          obs_obj.grid_size,
+        "battery_level":      obs_obj.battery_level,
+        "inventory_count":    obs_obj.inventory_count,
+        "message":            obs_obj.message,
+        "robot_mode":         obs_obj.robot_mode,
+        "home_position":      obs_obj.home_position,
+        "unload_station":     obs_obj.unload_station,
+        "current_storage_load": obs_obj.current_storage_load,
+        "storage_capacity":   obs_obj.storage_capacity,
+        "distance_from_home": obs_obj.distance_from_home,
     }
 
 
 # ── Training ─────────────────────────────────────────────────────────────────
 
 def train(
-    task_ids: list[str] | None = None,
+    task_ids=None,
     episodes: int = 8000,
-    qtable: QTable | None = None,
+    qtable: QTable = None,
     verbose: bool = True,
 ) -> QTable:
     """
@@ -177,48 +202,45 @@ def train(
     env     = GarbageRobotEnv()
     epsilon = EPSILON_START
 
-    best_scores: dict[str, float] = {t: 0.0 for t in task_ids}
+    best_scores: dict = {t: 0.0 for t in task_ids}
 
     for ep in range(1, episodes + 1):
         task_id = random.choice(task_ids)
-        state_obj = env.reset(task_id)
-        obs       = _obs_from_env(env)   # Pydantic-version-safe
+        env.reset(task_id)
+        obs       = _obs_from_env(env)
         state     = encode_state(obs)
 
         total_reward = 0.0
         done         = False
 
         while not done:
-            # ε-greedy action selection
             if random.random() < epsilon:
                 action_idx = random.randrange(len(ACTIONS))
             else:
                 action_idx = qtable.best_action(state)
 
-            action   = ACTIONS[action_idx]
+            action     = ACTIONS[action_idx]
             result     = env.step(action)
-            next_obs   = result["observation"]   # already a dict from env.step()
+            next_obs   = result["observation"]
             reward     = result["reward"]
             done       = result["done"]
 
             next_state = encode_state(next_obs)
 
             # Bellman update
-            old_q    = qtable.get(state, action_idx)
+            old_q     = qtable.get(state, action_idx)
             td_target = reward + (0.0 if done else GAMMA * qtable.best_q(next_state))
-            new_q    = old_q + ALPHA * (td_target - old_q)
+            new_q     = old_q + ALPHA * (td_target - old_q)
             qtable.update(state, action_idx, new_q)
 
             state = next_state
             obs   = next_obs
             total_reward += reward
 
-        # Track best score per task
         score = env.grade(task_id)
         if score > best_scores[task_id]:
             best_scores[task_id] = score
 
-        # Decay exploration
         epsilon = max(EPSILON_END, epsilon * EPSILON_DECAY)
 
         if verbose and ep % 500 == 0:
@@ -245,21 +267,17 @@ class QLearningAgent:
         self.loaded = self.qtable.load(path)
 
     def get_action(self, obs: dict) -> str | None:
-        """
-        Return the greedy Q-table action for `obs`, or None if the state is unknown.
-        inference.py should fall back to BFS when None is returned.
-        """
         if not self.loaded:
             return None
         state = encode_state(obs)
         if state not in self.qtable._q:
-            return None  # unseen state — let BFS handle it
+            return None
         return ACTIONS[self.qtable.best_action(state)]
 
 
 # ── Evaluation ───────────────────────────────────────────────────────────────
 
-def evaluate(qtable: QTable, task_ids: list[str] | None = None, runs: int = 5) -> dict:
+def evaluate(qtable: QTable, task_ids=None, runs: int = 5) -> dict:
     """Run `runs` greedy episodes per task and return average scores."""
     if task_ids is None:
         task_ids = list(SCENARIOS.keys())
@@ -271,13 +289,13 @@ def evaluate(qtable: QTable, task_ids: list[str] | None = None, runs: int = 5) -
         scores = []
         for _ in range(runs):
             env.reset(task_id)
-            obs  = _obs_from_env(env)   # Pydantic-version-safe
+            obs  = _obs_from_env(env)
             done = False
             while not done:
                 state      = encode_state(obs)
                 action_idx = qtable.best_action(state)
                 result     = env.step(ACTIONS[action_idx])
-                obs        = result["observation"]  # already a dict
+                obs        = result["observation"]
                 done       = result["done"]
             scores.append(env.grade(task_id))
         avg = sum(scores) / len(scores)
@@ -293,10 +311,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Q-Learning for Garbage Robot")
     parser.add_argument("--train",    action="store_true", help="Run training")
     parser.add_argument("--eval",     action="store_true", help="Run evaluation only")
-    parser.add_argument("--episodes", type=int, default=8000, help="Training episodes (default 8000)")
-    parser.add_argument("--tasks",    nargs="+", default=None,
-                        help="Task IDs to train on (default: all)")
-    parser.add_argument("--output",   default=Q_TABLE_PATH, help="Q-table save path")
+    parser.add_argument("--episodes", type=int, default=8000)
+    parser.add_argument("--tasks",    nargs="+", default=None)
+    parser.add_argument("--output",   default=Q_TABLE_PATH)
     args = parser.parse_args()
 
     if args.train:
