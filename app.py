@@ -70,7 +70,12 @@ TASKS = [
 
 VALID_IDS = {t.id for t in TASKS}
 
-@app.get("/", tags=["health"])
+@app.get("/", include_in_schema=False)
+def ui():
+    """Serve the dashboard HTML at the root."""
+    return FileResponse("frontend/index.html")
+
+@app.get("/api/health", tags=["health"])
 def health():
     return {"status": "ok", "env": "garbage-collecting-robot"}
 
@@ -244,10 +249,7 @@ def configure(body: ConfigureInput):
 # This makes the frontend accessible at /ui on the same origin as the API,
 # which is required for HuggingFace Spaces (no localhost cross-origin issues).
 
-@app.get("/ui", include_in_schema=False)
-def ui():
-    """Serve the dashboard HTML."""
-    return FileResponse("frontend/index.html")
+# Redundant /ui route removed to avoid confusion.
 
 # Mount static assets (style.css, script.js) at /static
 if os.path.exists("frontend/style.css") or os.path.exists("frontend/script.js"):
