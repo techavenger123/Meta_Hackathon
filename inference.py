@@ -354,8 +354,9 @@ def reset_with_custom_garbage(task_id, garbage_positions):
 # EPISODE RUNNER
 # ──────────────────────────────────────────────────────────
 
-def print_log(log_dict):
-    print(json.dumps(log_dict), flush=True)
+def print_log(msg):
+    # Print strings directly for the validator, ensured to be flushed for parsing.
+    print(msg, flush=True)
 
 
 def run_episode(client, task_id, obs):
@@ -365,8 +366,7 @@ def run_episode(client, task_id, obs):
         "remote-llm" if client                            else
         "bfs"
     )
-    print_log({"type": "[START]", "task_id": task_id,
-               "model": MODEL_NAME, "policy": policy, "max_steps": MAX_STEPS})
+    print_log(f"\n[START] task={task_id} model={MODEL_NAME} policy={policy}")
 
     total_reward    = 0.0
     done            = False
@@ -392,21 +392,8 @@ def run_episode(client, task_id, obs):
         total_reward += reward
 
         # Log includes autonomous-override details for debugging
-        log_entry = {
-            "type":           "[STEP]",
-            "step":           step_idx,
-            "action":         action,
-            "effective":      info.get("effective_command", action),
-            "overridden":     info.get("autonomous_override", False),
-            "mode":           obs.get("robot_mode", "normal"),
-            "battery":        obs.get("battery_level"),
-            "storage":        f"{obs.get('current_storage_load')}/{obs.get('storage_capacity')}",
-            "dist_home":      obs.get("distance_from_home"),
-            "reward":         round(reward, 2),
-            "total_reward":   round(total_reward, 2),
-            "done":           done,
-        }
-        print_log(log_entry)
+        # Simplified string log for the validator
+        print_log(f"[STEP] step={step_idx} action={action} reward={round(reward, 2)} done={done}")
 
         if done:
             break
@@ -418,8 +405,7 @@ def run_episode(client, task_id, obs):
     except Exception:
         score = 0.0
 
-    print_log({"type": "[END]", "task_id": task_id, "total_steps": step_idx,
-               "final_reward": round(total_reward, 2), "score": score})
+    print_log(f"[END] task={task_id} score={score} steps={step_idx}\n")
     return score
 
 
