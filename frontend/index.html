@@ -3,72 +3,143 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Garbage Collecting Robot Dashboard</title>
-    <!-- Use Inter font for modern aesthetics -->
+    <title>GarbageBot — RL Control Center</title>
+    <meta name="description" content="Real-time dashboard for the fine-tuned Llama-3.2 garbage collecting robot. Watch Q-learning and LLM policy decisions live.">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="background-mesh"></div>
+    <!-- Animated background -->
+    <div class="bg-orbs">
+        <div class="orb orb-1"></div>
+        <div class="orb orb-2"></div>
+        <div class="orb orb-3"></div>
+    </div>
+    <div class="grid-bg"></div>
+
     <div class="dashboard">
-        <header>
-            <div class="logo">
-                <div class="dot online" id="status-dot"></div>
-                <h1>Robot Control Center</h1>
+
+        <!-- ── HEADER ── -->
+        <header class="header-bar">
+            <div class="brand">
+                <div class="brand-icon">🤖</div>
+                <div>
+                    <h1>GarbageBot <span class="version-tag">v2.0</span></h1>
+                    <p class="brand-sub">Llama-3.2-3B · Q-Table · BFS</p>
+                </div>
             </div>
+
+            <div class="status-strip">
+                <div class="status-pill" id="server-pill">
+                    <span class="pulse-dot" id="status-dot"></span>
+                    <span id="status-label">Connecting…</span>
+                </div>
+                <div class="policy-badge" id="policy-badge">
+                    <span class="badge-icon">⚡</span>
+                    <span id="policy-label">–</span>
+                </div>
+            </div>
+
             <div class="controls">
                 <select id="task-select">
-                    <option value="task_easy">Small Room Clean (Easy)</option>
-                    <option value="task_medium">Medium Room (Obstacles)</option>
-                    <option value="task_hard">Large Maze Cleanup (Hard)</option>
+                    <option value="task_easy">🟢 Easy  — 5×5</option>
+                    <option value="task_medium">🟡 Medium — 7×7</option>
+                    <option value="task_hard">🔴 Hard  — 10×10</option>
                 </select>
-                <button id="reset-btn" class="btn secondary">Reset</button>
-                <button id="auto-btn" class="btn primary">Start Auto-RL</button>
-                <button id="manual-btn" class="btn outline">Manual Step</button>
+                <div class="speed-group">
+                    <label class="speed-label">Speed</label>
+                    <input type="range" id="speed-slider" min="100" max="1500" value="500" step="100">
+                    <span id="speed-val">500ms</span>
+                </div>
+                <button id="reset-btn"  class="btn secondary">↺ Reset</button>
+                <button id="auto-btn"   class="btn primary">▶  Run Policy</button>
+                <button id="manual-btn" class="btn outline">⏭ Step</button>
             </div>
         </header>
 
+        <!-- ── MAIN ── -->
         <main>
-            <div class="grid-container panel">
-                <div id="env-grid" class="grid-world"></div>
-                <p style="text-align: center; margin-top: 15px; font-size: 0.9em; opacity: 0.8; color: var(--text);">
-                    <i class="icon">💡</i> Tip: Click on any empty tile to place or remove custom garbage!
-                </p>
-            </div>
 
+            <!-- Grid world -->
+            <section class="grid-panel panel glass">
+                <div class="grid-header">
+                    <span class="grid-title">Environment</span>
+                    <div class="grid-meta">
+                        <span id="step-counter" class="mono-chip">Step 0</span>
+                        <span id="episode-score-chip" class="mono-chip accent-chip">Score 0.00</span>
+                    </div>
+                </div>
+                <div class="grid-stage" id="grid-stage">
+                    <div id="env-grid" class="grid-world"></div>
+                    <div id="particle-layer" class="particle-layer"></div>
+                </div>
+                <p class="grid-hint">💡 Click any empty cell to place or remove garbage</p>
+            </section>
+
+            <!-- Side panel -->
             <aside class="side-panel">
-                <div class="telemetry panel glass">
-                    <h2>Telemetry</h2>
-                    <div class="stat-box">
-                        <label>Battery Level</label>
-                        <div class="progress-bar">
-                            <div class="progress" id="battery-progress" style="width: 100%;"></div>
+
+                <!-- Telemetry -->
+                <div class="panel glass tele-card">
+                    <h2 class="section-title">Telemetry</h2>
+
+                    <div class="stat-row">
+                        <div class="stat-icon">🔋</div>
+                        <div class="stat-body">
+                            <div class="stat-label-row">
+                                <span class="stat-label">Battery</span>
+                                <span id="battery-text" class="stat-num">–</span>
+                            </div>
+                            <div class="progress-track">
+                                <div class="progress-fill" id="battery-progress"></div>
+                            </div>
                         </div>
-                        <span id="battery-text" class="stat-value">100%</span>
                     </div>
 
-                    <div class="stat-box">
-                        <label>Reward Score</label>
-                        <span id="score-text" class="stat-value highlight">0.0</span>
+                    <div class="stat-row">
+                        <div class="stat-icon">🗑️</div>
+                        <div class="stat-body">
+                            <div class="stat-label-row">
+                                <span class="stat-label">Collected</span>
+                                <span id="inventory-text" class="stat-num big-num">0</span>
+                            </div>
+                        </div>
                     </div>
 
-                    <div class="stat-box">
-                        <label>Garbage Collected</label>
-                        <span id="inventory-text" class="stat-value">0</span>
+                    <div class="stat-row">
+                        <div class="stat-icon">🏆</div>
+                        <div class="stat-body">
+                            <div class="stat-label-row">
+                                <span class="stat-label">Reward</span>
+                                <span id="score-text" class="stat-num big-num accent">0.00</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Mini reward chart -->
+                    <div class="chart-wrap">
+                        <canvas id="reward-chart" width="290" height="70"></canvas>
                     </div>
                 </div>
 
-                <div class="logs panel glass">
-                    <h2>RL Observations</h2>
+                <!-- Policy log -->
+                <div class="panel glass log-card">
+                    <div class="log-header">
+                        <h2 class="section-title">Policy Observations</h2>
+                        <button class="clear-btn" id="clear-log">✕ Clear</button>
+                    </div>
                     <div id="log-feed" class="log-feed">
-                        <p class="placeholder">Awaiting environment reset...</p>
+                        <p class="placeholder">Awaiting environment reset…</p>
                     </div>
+                    <p class="log-footer">🤖 Driven by fine-tuned Llama-3.2-3B</p>
                 </div>
+
             </aside>
         </main>
-    </div>
+
+    </div><!-- /dashboard -->
 
     <script src="script.js"></script>
 </body>

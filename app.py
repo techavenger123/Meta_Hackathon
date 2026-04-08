@@ -1,12 +1,14 @@
 """
 FastAPI server for the Garbage Collecting Robot OpenEnv environment.
-Exposes reset / step / state / tasks / grade endpoints.
+Exposes reset / step / state / tasks / grade / policy / configure endpoints.
 """
 
-import sys
 import os
+import sys
 sys.path.insert(0, os.path.dirname(__file__))
 
+from typing import List
+from pydantic import BaseModel
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -127,9 +129,8 @@ def grade(task_id: str):
 
 
 # ── Policy endpoint (fine-tuned LLM) ──────────────────────
-import os as _os
 
-LOCAL_MODEL_PATH = _os.environ.get(
+LOCAL_MODEL_PATH = os.environ.get(
     "LOCAL_MODEL_PATH",
     "/home/robotics-mu/.unsloth/studio/exports/unsloth_Llama-3.2-3B-Instruct-bnb-4bit_1775629280"
 )
@@ -208,9 +209,7 @@ def policy(body: PolicyInput):
     return {"action": heuristic_action(obs_dict), "source": "bfs"}
 
 
-# ── Dynamic garbage placement ──────────────────────────────────
-from pydantic import BaseModel
-from typing import List, Tuple
+# ── Dynamic garbage placement ──────────────────────────────
 
 class ConfigureInput(BaseModel):
     task_id: str = "task_easy"
