@@ -13,10 +13,10 @@ Actions:
 
 Usage:
     # Train all tasks and save
-    python qlearning.py --train --episodes 8000
+    python3 qlearning.py --train --episodes 8000
 
     # Evaluate silently (uses saved Q-table)
-    python qlearning.py --eval
+    python3 qlearning.py --eval
 """
 
 import os

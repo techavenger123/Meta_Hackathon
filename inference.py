@@ -1,7 +1,5 @@
 import os
 import time
-import argparse
-import random as _random
 import requests
 import json
 from collections import deque
@@ -221,49 +219,55 @@ def resolve_next_action(client, obs, context_history, stuck_counter=None) -> str
 # DYNAMIC GARBAGE PLACEMENT
 # ──────────────────────────────────────────────────────────
 
-def auto_garbage(grid_w, grid_h, obstacles, n):
+def prompt_custom_garbage(grid_w, grid_h, obstacles):
     """
-    Automatically place `n` random garbage pieces (non-interactive).
-    Used when --dynamic is set without --garbage coordinates.
-    """
-    obstacle_set = set(tuple(o) for o in obstacles)
-    candidates   = [(x, y) for x in range(grid_w) for y in range(grid_h)
-                    if (x, y) not in obstacle_set]
-    pieces = _random.sample(candidates, min(n, len(candidates)))
-    print(f"  [AUTO] Random garbage ({n} pieces): {pieces}")
-    return pieces
-
-
-def prompt_custom_garbage(grid_w, grid_h, obstacles,
-                           coords=None, n_random=None):
-    """
-    Non-interactive garbage placement.
-    - coords     : list of (x,y) tuples supplied via --garbage
-    - n_random   : int supplied via --random-garbage; falls back to 3
-    Interactive mode is only reached when both are None AND sys.stdin is a tty.
+    Interactive CLI — lets you place garbage tiles before each episode.
+    Supports: manual 'x,y' | 'random N' | 'done'
     """
     obstacle_set = set(tuple(o) for o in obstacles)
+    print(f"\n  Grid: {grid_w} x {grid_h}   Obstacles: {sorted(obstacle_set)}")
+    print("  Enter garbage positions:")
+    print("    x,y       place at column x, row y  (e.g. '4,4')")
+    print("    random N  place N random pieces      (e.g. 'random 5')")
+    print("    done      start the episode\n")
 
-    # ── Explicit coordinates (--garbage "3,4 5,6") ──────────
-    if coords:
-        garbage = []
-        for x, y in coords:
+    garbage = []
+    while True:
+        raw = input("  Garbage > ").strip().lower()
+
+        if raw == "done":
+            if not garbage:
+                print("  Need at least one garbage tile.")
+                continue
+            break
+
+        if raw.startswith("random"):
+            import random
+            parts = raw.split()
+            n = int(parts[1]) if len(parts) > 1 else 3
+            candidates = [(x, y) for x in range(grid_w) for y in range(grid_h)
+                          if (x, y) not in obstacle_set]
+            garbage = random.sample(candidates, min(n, len(candidates)))
+            print(f"  Random garbage: {garbage}")
+            break
+
+        try:
+            x, y = map(int, raw.split(","))
             if not (0 <= x < grid_w and 0 <= y < grid_h):
-                print(f"  [WARN] ({x},{y}) out of bounds — skipped")
+                print(f"  Out of bounds — valid: 0-{grid_w-1}, 0-{grid_h-1}")
                 continue
             if (x, y) in obstacle_set:
-                print(f"  [WARN] ({x},{y}) is an obstacle — skipped")
+                print(f"  ({x},{y}) is an obstacle.")
+                continue
+            if (x, y) in garbage:
+                print(f"  ({x},{y}) already added.")
                 continue
             garbage.append((x, y))
-        if garbage:
-            print(f"  [GARBAGE] Using specified positions: {garbage}")
-            return garbage
-        print("  [WARN] No valid coords given — falling back to random.")
+            print(f"  Added ({x},{y})  total: {garbage}")
+        except ValueError:
+            print("  Format: x,y  e.g. '3,4'")
 
-    # ── Random N (--random-garbage N or default 3) ───────────
-    n = n_random if n_random is not None else 3
-    return auto_garbage(grid_w, grid_h, obstacles, n)
-
+    return garbage
 
 
 def reset_with_custom_garbage(task_id, garbage_positions):
@@ -344,75 +348,12 @@ def run_episode(client, task_id, obs):
 # MAIN
 # ──────────────────────────────────────────────────────────
 
-def parse_args():
-    p = argparse.ArgumentParser(
-        description="Garbage Collecting Robot — Inference",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-examples:
-  python inference.py                          # run all tasks, predefined garbage
-  python inference.py --tasks easy hard        # only easy + hard
-  python inference.py --dynamic                # random garbage (3 pieces each)
-  python inference.py --dynamic --random-garbage 5   # 5 random pieces per task
-  python inference.py --dynamic --garbage "2,3 4,5"  # specific positions
-"""
-    )
-    p.add_argument(
-        "--tasks", nargs="+",
-        choices=["easy", "medium", "hard", "all"],
-        default=["all"],
-        metavar="TASK",
-        help="which tasks to run: easy | medium | hard | all  (default: all)"
-    )
-    p.add_argument(
-        "--dynamic", action="store_true",
-        help="place garbage dynamically instead of using predefined positions"
-    )
-    p.add_argument(
-        "--random-garbage", type=int, default=None,
-        metavar="N",
-        help="(with --dynamic) place N random garbage pieces per task (default: 3)"
-    )
-    p.add_argument(
-        "--garbage", type=str, default=None,
-        metavar="'x,y ...'  ",
-        help=("(with --dynamic) explicit garbage positions, space-separated pairs "
-              "e.g. \"2,3 4,5 6,7\"")
-    )
-    return p.parse_args()
-
-
 def main():
     global _local_model, _local_tokenizer, _ql_agent
-
-    args = parse_args()
-
-    # Resolve task list
-    task_name_map = {
-        "easy":   "task_easy",
-        "medium": "task_medium",
-        "hard":   "task_hard",
-    }
-    if "all" in args.tasks:
-        tasks = ["task_easy", "task_medium", "task_hard"]
-    else:
-        tasks = [task_name_map[t] for t in dict.fromkeys(args.tasks)]
-
-    # Parse --garbage coordinates
-    explicit_coords = None
-    if args.garbage:
-        try:
-            explicit_coords = [tuple(map(int, pair.split(",")))
-                               for pair in args.garbage.split()]
-        except ValueError:
-            print("[ERROR] --garbage format must be space-separated 'x,y' pairs "
-                  "e.g. \"2,3 4,5\". Ignoring.")
 
     print("=" * 55)
     print("  Garbage Collecting Robot — Inference")
     print("=" * 55)
-    print(f"  Tasks   : {', '.join(tasks)}")
-    print(f"  Dynamic : {'yes' if args.dynamic else 'no (predefined garbage)'}")
 
     # ── 1. Load Q-Learning policy (fastest, no GPU needed) ────
     if QLearningAgent is not None:
@@ -447,7 +388,25 @@ def main():
         print("          Falling back to remote API / BFS heuristic.")
         _local_model, _local_tokenizer = None, None
 
+    import argparse
+    parser = argparse.ArgumentParser(description="Run GarbageBot Inference")
+    parser.add_argument("--dynamic", action="store_true", help="Interactive dynamic garbage placement")
+    parser.add_argument("--task", choices=["1", "2", "3", "4", "easy", "medium", "hard", "all"], default="all", 
+                        help="Task to run: 'easy', 'medium', 'hard', or 'all'")
+    args = parser.parse_args()
 
+    dynamic = args.dynamic
+    
+    if args.task in ["1", "easy"]:
+        tasks = ["task_easy"]
+    elif args.task in ["2", "medium"]:
+        tasks = ["task_medium"]
+    elif args.task in ["3", "hard"]:
+        tasks = ["task_hard"]
+    else:
+        tasks = ["task_easy", "task_medium", "task_hard"]
+    
+    print(f"\n  [INFO] Running tasks: {', '.join(tasks)}")
 
     client = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL) if HF_TOKEN else None
     if not client and _local_model is None:
@@ -466,13 +425,11 @@ def main():
             print(f"Reset failed: {e}")
             continue
 
-        if args.dynamic:
+        if dynamic:
             garbage = prompt_custom_garbage(
                 base_obs["grid_size"][0],
                 base_obs["grid_size"][1],
-                base_obs["obstacle_positions"],
-                coords=explicit_coords,
-                n_random=args.random_garbage,
+                base_obs["obstacle_positions"]
             )
             obs = reset_with_custom_garbage(task_id, garbage)
         else:
