@@ -21,4 +21,5 @@ EXPOSE 7860
 # Force unbuffered output for cleaner logs
 ENV PYTHONUNBUFFERED=1
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]
+# Updated entry point for the new directory structure
+CMD ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "7860"]

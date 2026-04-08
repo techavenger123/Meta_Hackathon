@@ -12,7 +12,7 @@ Fix applied:
 
 import os
 import sys
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from typing import List
 from pydantic import BaseModel
@@ -73,7 +73,7 @@ VALID_IDS = {t.id for t in TASKS}
 @app.get("/", include_in_schema=False)
 def ui():
     """Serve the dashboard HTML at the root."""
-    return FileResponse("frontend/index.html")
+    return FileResponse(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend", "index.html"))
 
 @app.get("/api/health", tags=["health"])
 def health():
@@ -252,8 +252,8 @@ def configure(body: ConfigureInput):
 # Redundant /ui route removed to avoid confusion.
 
 # Mount static assets (style.css, script.js) at /static
-if os.path.exists("frontend/style.css") or os.path.exists("frontend/script.js"):
-    app.mount("/static", StaticFiles(directory="frontend"), name="static")
+if os.path.exists(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend", "style.css")):
+    app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend")), name="static")
 
 
 def main():
