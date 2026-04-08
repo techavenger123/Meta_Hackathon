@@ -17,7 +17,11 @@ dependencies = [
     "accelerate>=0.27.0",
     "bitsandbytes>=0.43.0",
     "huggingface_hub",
+    "openenv-core>=0.2.0",
 ]
+
+[project.scripts]
+server = "app:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]

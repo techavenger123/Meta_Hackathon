@@ -256,6 +256,9 @@ if os.path.exists("frontend/style.css") or os.path.exists("frontend/script.js"):
     app.mount("/static", StaticFiles(directory="frontend"), name="static")
 
 
-if __name__ == "__main__":
+def main():
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=7860)
+
+if __name__ == "__main__":
+    main()
