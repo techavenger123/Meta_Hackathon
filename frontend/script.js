@@ -58,8 +58,7 @@ speedSlider.addEventListener("input", () => {
 // Keep robot transition duration slightly under step delay
 function syncRobotTransition() {
     if (!robotEntity) return;
-    const dur = Math.min(Math.max(stepDelay * 0.72, 160), 480);
-    envGrid.style.setProperty("--move-dur", `${dur}ms`);
+    envGrid.style.setProperty("--move-dur", `${stepDelay}ms`);
 }
 
 // ── Log helpers ───────────────────────────────────────────
@@ -210,13 +209,10 @@ function renderGrid(obs, isReset = false) {
         syncRobotTransition();
     }
 
-    // Smooth robot move
+    // Continuous robot move without ghost trails
     if (robotEntity) {
         const nl = wx(obs.robot_position[0]);
         const nt = wy(obs.robot_position[1], H);
-        const ol = parseInt(robotEntity.style.left) || nl;
-        const ot = parseInt(robotEntity.style.top)  || nt;
-        if (nl !== ol || nt !== ot) addTrail(ol, ot);
         robotEntity.style.left = `${nl}px`;
         robotEntity.style.top  = `${nt}px`;
     }
