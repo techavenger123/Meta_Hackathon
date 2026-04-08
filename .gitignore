@@ -1,4 +1,5 @@
 .venv/
+venv/
 Meta/
 Robot/
 __pycache__/
