@@ -1,214 +1,115 @@
 ---
-title: Incident Response Triage
-emoji: 🚨
-colorFrom: red
-colorTo: orange
+title: GarbageBot — RL Control Center
+emoji: 🗑️
+colorFrom: blue
+colorTo: green
 sdk: docker
 app_port: 7860
 pinned: false
 tags:
   - openenv
+  - robotics
+  - reinforcement-learning
+  - llama-3.2
 ---
 
-# 🚨 Incident Response Triage — OpenEnv
+# 🤖 Garbage Collecting Robot — OpenEnv
 
-An OpenEnv-compliant reinforcement learning environment simulating **production incident response and triage**. AI agents act as Site Reliability Engineers (SREs) who must diagnose and resolve real-world infrastructure incidents across a simulated microservices architecture.
+An OpenEnv-compliant reinforcement learning environment for a garbage collecting robot. The agent must navigate a grid room to pick up garbage while managing battery constraints and storage capacity.
 
-## Why Incident Response?
+## Why Garbage Collection?
 
-Incident response costs the tech industry **$70B+ annually** in downtime. SREs spend countless hours triaging alerts, correlating logs, and remediating failures. This environment provides a realistic training ground for AI agents to learn:
-
-- **Alert triage** — prioritize and correlate production alerts
-- **Root cause analysis** — trace through service dependencies to find the source
-- **Remediation** — apply the correct fix (restart, rollback, scale, etc.)
-- **Efficient resolution** — minimize time-to-resolution under pressure
+Autonomous garbage collection is a classic robotics challenge involving pathfinding, resource management (battery), and state management (storage capacity). This environment provides a realistic training ground for AI agents to learn:
+- **Optimal Navigation** — shortest paths via BFS and Q-Learning.
+- **Resource Management** — returning to base for charging before battery depletion.
+- **Logistics** — managing a 6-unit storage bin and prioritizing unload cycles.
 
 ---
 
 ## Architecture
 
-The environment simulates a **10-service microservices system**:
+The environment is a discrete grid world where the robot interacts with garbage, obstacles, a charging station (Home), and an Unload Station.
 
 ```
-┌──────────────┐
-│ web-frontend │
-└──────┬───────┘
-       ▼
-┌──────────────┐
-│ api-gateway  │──────┬──────┬──────┬──────────────┐
-└──────────────┘      ▼      ▼      ▼              ▼
-              ┌──────────┐ ┌────────────┐ ┌──────────────────┐ ┌───────┐
-              │auth-svc  │ │user-svc    │ │order-svc         │ │notif  │
-              └────┬─────┘ └─────┬──────┘ └──┬────┬─────┬────┘ └───┬───┘
-                   ▼             ▼            ▼    ▼     ▼          ▼
-              ┌──────────┐  ┌───────┐  ┌──────────┐ ┌─────────┐ ┌───────┐
-              │ database │  │ cache │  │payment   │ │ msg-q   │ │ cache │
-              └──────────┘  └───────┘  └──────────┘ └─────────┘ └───────┘
+┌──────────┐
+│ Dashboard│ (FastAPI + Vanilla JS)
+└─────┬────┘
+      ▼
+┌──────────┐
+│ API      │ (app.py)
+└─────┬────┘
+      ▼
+┌──────────┐
+│ Env Logic│ (environment.py)
+└──────────┘
 ```
 
 ---
 
 ## Tasks
 
-| Task ID | Difficulty | Description | Max Steps |
+| Task ID | Difficulty | Description | Grid Size |
 |---------|-----------|-------------|-----------|
-| `task_easy` | 🟢 Easy | Memory leak in user-service. Clear symptoms, straightforward fix. | 15 |
-| `task_medium` | 🟡 Medium | Database connection pool exhaustion causing cascading timeouts. Multiple services affected. | 20 |
-| `task_hard` | 🔴 Hard | Bad deployment of payment-service causes cascading failures with misleading symptoms and red herrings. | 25 |
+| `task_easy` | 🟢 Easy | Small 5x5 grid, 1 piece of garbage. | 5x5 |
+| `task_medium` | 🟡 Medium | 7x7 grid with obstacles, 3 pieces of garbage. | 7x7 |
+| `task_hard` | 🔴 Hard | 10x10 maze, 5 pieces of garbage, strict battery. | 10x10 |
 
 ---
 
 ## Action Space
 
-Text commands sent as strings:
-
-| Command | Description |
-|---------|-------------|
-| `INVESTIGATE <service>` | View recent logs for a service |
-| `CHECK_METRICS <service>` | View CPU, memory, latency, error rate, etc. |
-| `CHECK_DEPENDENCIES <service>` | View upstream/downstream dependencies |
-| `RESTART <service>` | Restart a service |
-| `SCALE <service> <count>` | Scale service instances |
-| `ROLLBACK <service>` | Roll back to previous deployment version |
-| `FLUSH_CACHE` | Clear the Redis cache |
-| `INCREASE_CONNECTIONS <service>` | Increase database connection pool |
-| `DIAGNOSE <root_cause>` | Submit your root cause diagnosis |
-| `RESOLVE <summary>` | Mark incident as resolved |
-
-**Services:** `web-frontend`, `api-gateway`, `auth-service`, `user-service`, `order-service`, `payment-service`, `notification-service`, `database`, `cache`, `message-queue`
+Movement and interaction commands:
+- `UP`, `DOWN`, `LEFT`, `RIGHT`: Move the robot one cell.
+- `COLLECT`: Pick up garbage if the robot is on its cell.
 
 ---
 
 ## Observation Space
 
-```json
-{
-  "alerts": [
-    {"id": "A1", "severity": "critical", "service": "user-service",
-     "message": "Memory usage critical: 92%", "timestamp": "10:24:00"}
-  ],
-  "services": {
-    "user-service": {
-      "cpu_percent": 45.0, "memory_percent": 92.0,
-      "request_latency_ms": 850, "error_rate_percent": 12.0,
-      "active_connections": 156, "status": "degraded"
-    }
-  },
-  "action_result": "Logs for user-service showing memory leak...",
-  "step_number": 3,
-  "steps_remaining": 12,
-  "incident_resolved": false,
-  "task_id": "task_easy",
-  "done": false
-}
-```
+The environment returns a detailed state:
+- `robot_position`: `(x, y)`
+- `garbage_positions`: List of `(x, y)`
+- `battery_level`: Current battery vs max.
+- `current_storage_load`: Current items vs capacity (6).
+- `robot_mode`: `normal`, `recharging`, or `unloading`.
 
 ---
 
-## Reward Function
+## Policy Priority Chain
 
-| Event | Reward |
-|-------|--------|
-| Each step | `-0.01` (time pressure) |
-| Investigate root cause service | `+0.10` |
-| Investigate context/symptoms | `+0.05` |
-| Correct root cause diagnosis | `+0.20 to +0.25` |
-| Correct primary remediation | `+0.25 to +0.35` |
-| Correct secondary remediation (hard) | `+0.10` |
-| Successful resolution | `+0.25` |
-| Wrong remediation action | `-0.05` |
-| Invalid command | `-0.03` |
-
-**Total possible: ~1.0** per task (minus step penalties). Score normalized to **0.0 – 1.0**.
+Decisions can be driven by:
+1. **Q-Learning Table** — pre-trained optimal policy.
+2. **Llama-3.2-3B-Instruct** — fine-tuned LLM policy.
+3. **BFS Heuristic** — reliable fallback pathfinding.
 
 ---
 
-## API Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/` | Health check |
-| `POST` | `/reset` | Reset environment `{"task_id": "task_easy"}` |
-| `POST` | `/step` | Execute action `{"command": "INVESTIGATE user-service"}` |
-| `GET` | `/state` | Get current state with milestones |
-| `GET` | `/tasks` | List all tasks |
-| `GET` | `/grade/{task_id}` | Run grader for a task |
-
----
-
-## Setup & Running
-
-### Local
+## Local Development
 
 ```bash
 # 1. Install dependencies
 pip install -r requirements.txt
 
 # 2. Start the server
-uvicorn app:app --host 0.0.0.0 --port 7860 --reload
+uvicorn app:app --host 0.0.0.0 --port 7860
 
-# 3. Set environment variables
-export API_BASE_URL=https://api.openai.com/v1
-export MODEL_NAME=gpt-4o-mini
-export HF_TOKEN=your_api_key
-export ENV_URL=http://localhost:7860
-
-# 4. Run inference
-python inference.py
+# 3. Training
+python qlearning.py --train --episodes 10000
 ```
-
-### Docker
-
-```bash
-docker build -t incident-response-triage .
-docker run -p 7860:7860 incident-response-triage
-```
-
-Then in another terminal:
-```bash
-export ENV_URL=http://localhost:7860
-python inference.py
-```
-
----
-
-## Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `API_BASE_URL` | LLM API endpoint (e.g., `https://api.openai.com/v1`) |
-| `MODEL_NAME` | Model identifier (e.g., `gpt-4o-mini`) |
-| `HF_TOKEN` | Hugging Face / API key |
-| `ENV_URL` | URL where the env server is running |
-
----
-
-## Baseline Scores
-
-| Task | Greedy Agent | Expected LLM Agent |
-|------|-------------|-------------------|
-| `task_easy` | ~0.94 | 0.70 – 0.95 |
-| `task_medium` | ~0.92 | 0.50 – 0.85 |
-| `task_hard` | ~0.90 | 0.30 – 0.75 |
 
 ---
 
 ## Project Structure
 
 ```
-├── app.py              # FastAPI server (OpenEnv endpoints)
-├── environment.py      # Core environment logic (reset/step/state/grade)
-├── models.py           # Pydantic typed models
-├── scenarios.py        # Incident scenario definitions
-├── inference.py        # Baseline inference script
-├── openenv.yaml        # OpenEnv specification
-├── requirements.txt    # Python dependencies
-├── Dockerfile          # Container definition
+├── app.py              # FastAPI server
+├── environment.py      # Core RL logic
+├── models.py           # Data schemas
+├── scenarios.py        # Task definitions
+├── qlearning.py        # Tabular RL training
+├── inference.py        # Policy resolver
+├── frontend/           # Dashboard HTML/CSS/JS
+├── qtable.json         # Trained policy weights
+├── Dockerfile          # Deployment container
 └── README.md           # This file
 ```
-# Meta_Hackathon
-# Meta_Hackathon
-# Meta_Hackathon
-# Meta_Hackathon
-# Meta_Hackathon
-# Meta_Hackathon
